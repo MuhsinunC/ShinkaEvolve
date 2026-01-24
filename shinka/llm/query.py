@@ -33,7 +33,7 @@ THINKING_TOKENS = {
     "low": 2048,
     "medium": 4096,
     "high": 8192,
-    "max": 16384,
+    "max": 32768,
 }
 
 
@@ -154,7 +154,8 @@ def sample_model_kwargs(
     elif kwargs_dict["model_name"] in (
         REASONING_CLAUDE_MODELS + REASONING_BEDROCK_MODELS
     ):
-        kwargs_dict["max_tokens"] = min(random.choice(max_tokens), 16384)
+        # Allow full max_tokens for extended thinking (needs to exceed thinking budget)
+        kwargs_dict["max_tokens"] = random.choice(max_tokens)
         r_effort = random.choice(reasoning_efforts)
         think_bool = r_effort != "auto"
         if think_bool:
