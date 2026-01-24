@@ -6,10 +6,29 @@ from typing import Union, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
 
-PATCH_PATTERN = re.compile(
+# Git-style format: <<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE
+GIT_STYLE_PATTERN = re.compile(
     r"<{7}\s*SEARCH\s*\n(.*?)\n\s*={7}\s*\n(.*?)\n\s*>{7}\s*REPLACE\s*",
     re.DOTALL,
 )
+
+# XML-style format: <SEARCH>...</SEARCH> <REPLACE>...</REPLACE>
+# This is what Claude sometimes outputs with extended thinking enabled
+XML_STYLE_PATTERN = re.compile(
+    r"<SEARCH>\s*(.*?)\s*</SEARCH>\s*<REPLACE>\s*(.*?)\s*</REPLACE>",
+    re.DOTALL,
+)
+
+# Header-style format: SEARCH: ... REPLACE: ...
+# Another format Claude uses with extended thinking, often in markdown code blocks
+# Matches SEARCH: followed by content, then REPLACE: followed by content
+HEADER_STYLE_PATTERN = re.compile(
+    r"SEARCH:\s*\n(.*?)\n\s*REPLACE:\s*\n(.*?)(?=\n```|\nSEARCH:|\Z)",
+    re.DOTALL,
+)
+
+# Combined pattern for matching either format
+PATCH_PATTERN = GIT_STYLE_PATTERN  # Keep for backward compatibility
 
 
 EVOLVE_START = re.compile(r"(?:#|//|)?\s*EVOLVE-BLOCK-START")
@@ -561,6 +580,39 @@ def _create_no_evolve_block_error(original_text: str, operation: str) -> str:
     return "\n".join(error_parts)
 
 
+def _find_all_patch_blocks(patch_text: str):
+    """
+    Find all SEARCH/REPLACE blocks in patch_text, trying multiple formats.
+    Supports: git-style, XML-style, and header-style formats.
+    Returns list of (search, replace) tuples.
+    """
+    blocks = []
+
+    # Try git-style first (<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE)
+    for block in GIT_STYLE_PATTERN.finditer(patch_text):
+        blocks.append((block.group(1), block.group(2), block.start()))
+        logger.debug(f"Found git-style block at position {block.start()}")
+
+    # Try XML-style (<SEARCH>...</SEARCH><REPLACE>...</REPLACE>)
+    for block in XML_STYLE_PATTERN.finditer(patch_text):
+        blocks.append((block.group(1), block.group(2), block.start()))
+        logger.debug(f"Found XML-style block at position {block.start()}")
+
+    # Try header-style (SEARCH: ... REPLACE: ...)
+    for block in HEADER_STYLE_PATTERN.finditer(patch_text):
+        blocks.append((block.group(1), block.group(2), block.start()))
+        logger.debug(f"Found header-style block at position {block.start()}")
+
+    if not blocks:
+        logger.warning("No SEARCH/REPLACE blocks found with any format (git-style, XML-style, header-style)")
+
+    # Sort by position to maintain order
+    blocks.sort(key=lambda x: x[2])
+
+    # Remove position from tuples
+    return [(search, replace) for search, replace, _ in blocks]
+
+
 def apply_search_replace(
     patch_text: str,
     original: str,
@@ -568,13 +620,20 @@ def apply_search_replace(
 ) -> tuple[str, int]:
     """
     Apply SEARCH/REPLACE blocks but **only** inside EVOLVE regions.
+    Supports both git-style (<<<<<<< SEARCH) and XML-style (<SEARCH>) formats.
     Mutable ranges are recalculated after each replacement to account for
     text changes.
     """
     new_text = original
     num_applied = 0
-    for block in PATCH_PATTERN.finditer(patch_text):
-        search, replace = block.group(1), block.group(2)
+
+    # Find all blocks from both formats
+    patch_blocks = _find_all_patch_blocks(patch_text)
+
+    if not patch_blocks:
+        logger.debug(f"No SEARCH/REPLACE blocks found in patch text (tried both git-style and XML-style)")
+
+    for search, replace in patch_blocks:
         # Clean EVOLVE markers from search and replace text if present
         search = _clean_evolve_markers(search)
         replace = _clean_evolve_markers(replace)

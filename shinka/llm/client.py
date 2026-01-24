@@ -1,6 +1,7 @@
 from typing import Any, Tuple
 import os
 import anthropic
+import httpx
 import openai
 import instructor
 from pathlib import Path
@@ -31,7 +32,10 @@ def get_client_llm(model_name: str, structured_output: bool = False) -> Tuple[An
     """
     # print(f"Getting client for model {model_name}")
     if model_name in CLAUDE_MODELS.keys():
-        client = anthropic.Anthropic()
+        # Extended timeout for 32K thinking tokens (can take 10-30 minutes)
+        client = anthropic.Anthropic(
+            timeout=httpx.Timeout(1800.0, connect=60.0)  # 30 min total, 1 min connect
+        )
         if structured_output:
             client = instructor.from_anthropic(
                 client, mode=instructor.mode.Mode.ANTHROPIC_JSON

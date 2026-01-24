@@ -3,6 +3,8 @@ import uuid
 import time
 import logging
 import yaml
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from rich.logging import RichHandler
 from rich.table import Table
 from rich.console import Console
@@ -251,6 +253,13 @@ class EvolutionRunner:
         self.best_program_id: Optional[str] = None
         self.next_generation_to_submit = 0
 
+        # Threading lock for database operations and shared state
+        self._db_lock = threading.Lock()
+        self._generation_lock = threading.Lock()
+
+        # Thread pool for parallel LLM calls
+        self._llm_executor = ThreadPoolExecutor(max_workers=evo_config.max_parallel_jobs)
+
         if resuming_run:
             self.completed_generations = self.db.last_iteration + 1
             self.next_generation_to_submit = self.completed_generations
@@ -343,12 +352,27 @@ class EvolutionRunner:
                     logger.info("All generations completed, exiting...")
                     break
 
-                # Submit new jobs to fill the queue (only if we have capacity)
-                if (
-                    len(self.running_jobs) < max_jobs
-                    and self.next_generation_to_submit < target_gens
-                ):
-                    self._submit_new_job()
+                # Submit new jobs to fill the queue (parallel submission)
+                available_slots = max_jobs - len(self.running_jobs)
+                jobs_to_submit = min(
+                    available_slots,
+                    target_gens - self.next_generation_to_submit
+                )
+
+                if jobs_to_submit > 0:
+                    # Submit multiple jobs in parallel using thread pool
+                    futures = []
+                    for _ in range(jobs_to_submit):
+                        if self.next_generation_to_submit < target_gens:
+                            future = self._llm_executor.submit(self._submit_new_job)
+                            futures.append(future)
+
+                    # Wait for all submissions to complete
+                    for future in as_completed(futures):
+                        try:
+                            future.result()  # Raises any exceptions from the thread
+                        except Exception as e:
+                            logger.error(f"Error in parallel job submission: {e}")
 
                 # Wait a bit before checking again
                 time.sleep(2)
@@ -618,13 +642,13 @@ class EvolutionRunner:
         self.completed_generations = completed_up_to
 
     def _submit_new_job(self):
-        """Submit a new job to the queue."""
-        current_gen = self.next_generation_to_submit
-
-        if current_gen >= self.evo_config.num_generations:
-            return
-
-        self.next_generation_to_submit += 1
+        """Submit a new job to the queue (thread-safe)."""
+        # Thread-safe generation counter increment
+        with self._generation_lock:
+            current_gen = self.next_generation_to_submit
+            if current_gen >= self.evo_config.num_generations:
+                return
+            self.next_generation_to_submit += 1
 
         exec_fname = (
             f"{self.results_dir}/{FOLDER_PREFIX}_{current_gen}/main.{self.lang_ext}"
@@ -652,17 +676,19 @@ class EvolutionRunner:
             for nov_attempt in range(self.evo_config.max_novelty_attempts):
                 # Loop over patch resamples - including parents
                 for resample in range(self.evo_config.max_patch_resamples):
-                    (
-                        parent_program,
-                        archive_programs,
-                        top_k_programs,
-                    ) = self.db.sample(
-                        target_generation=current_gen,
-                        novelty_attempt=nov_attempt + 1,
-                        max_novelty_attempts=self.evo_config.max_novelty_attempts,
-                        resample_attempt=resample + 1,
-                        max_resample_attempts=self.evo_config.max_patch_resamples,
-                    )
+                    # Thread-safe database sampling
+                    with self._db_lock:
+                        (
+                            parent_program,
+                            archive_programs,
+                            top_k_programs,
+                        ) = self.db.sample(
+                            target_generation=current_gen,
+                            novelty_attempt=nov_attempt + 1,
+                            max_novelty_attempts=self.evo_config.max_novelty_attempts,
+                            resample_attempt=resample + 1,
+                            max_resample_attempts=self.evo_config.max_patch_resamples,
+                        )
                     archive_insp_ids = [p.id for p in archive_programs]
                     top_k_insp_ids = [p.id for p in top_k_programs]
                     parent_id = parent_program.id
@@ -739,7 +765,7 @@ class EvolutionRunner:
         # Submit the job asynchronously
         job_id = self.scheduler.submit_async(exec_fname, results_dir)
 
-        # Add to running jobs queue
+        # Add to running jobs queue (thread-safe)
         running_job = RunningJob(
             job_id=job_id,
             exec_fname=exec_fname,
@@ -755,7 +781,8 @@ class EvolutionRunner:
             embed_cost=embed_cost,
             novelty_cost=novelty_cost,
         )
-        self.running_jobs.append(running_job)
+        with self._generation_lock:
+            self.running_jobs.append(running_job)
 
         if self.verbose:
             logger.info(
