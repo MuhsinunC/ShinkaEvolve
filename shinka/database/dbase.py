@@ -300,7 +300,7 @@ class ProgramDatabase:
                     if db_shm_file.exists():
                         db_shm_file.unlink()
                 db_file.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(str(db_file), timeout=30.0)
+                self.conn = sqlite3.connect(str(db_file), timeout=30.0, check_same_thread=False)
                 logger.debug(f"Connected to SQLite database: {db_file}")
             else:
                 if not db_file.exists():
@@ -308,13 +308,13 @@ class ProgramDatabase:
                         f"Database file not found for read-only connection: {db_file}"
                     )
                 db_uri = f"file:{db_file}?mode=ro"
-                self.conn = sqlite3.connect(db_uri, uri=True, timeout=30.0)
+                self.conn = sqlite3.connect(db_uri, uri=True, timeout=30.0, check_same_thread=False)
                 logger.debug(
                     "Connected to SQLite database in read-only mode: %s",
                     db_file,
                 )
         else:
-            self.conn = sqlite3.connect(":memory:")
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
             logger.info("Initialized in-memory SQLite database.")
 
         self.conn.row_factory = sqlite3.Row
@@ -1259,7 +1259,7 @@ class ProgramDatabase:
             )
             db_path_obj.parent.mkdir(parents=True, exist_ok=True)
 
-        self.conn = sqlite3.connect(str(db_path_obj), timeout=30.0)
+        self.conn = sqlite3.connect(str(db_path_obj), timeout=30.0, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
         self._create_tables()
