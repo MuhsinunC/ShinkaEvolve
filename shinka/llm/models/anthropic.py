@@ -54,12 +54,14 @@ def query_anthropic(
         }
     ]
     if output_model is None:
-        response = client.messages.create(
+        # Use streaming for extended thinking (required for 10+ minute requests)
+        with client.messages.stream(
             model=model,
             system=system_msg,
             messages=new_msg_history,
             **kwargs,
-        )
+        ) as stream:
+            response = stream.get_final_message()
         # Separate thinking from non-thinking content
         if len(response.content) == 1:
             thought = ""
