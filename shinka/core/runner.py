@@ -330,6 +330,11 @@ class EvolutionRunner:
             while (
                 self.completed_generations < target_gens or len(self.running_jobs) > 0
             ):
+                # Recover any ghost generations (main.py exists but scorer never ran)
+                ghost_recovered = self._recover_ghost_generations()
+                if ghost_recovered > 0:
+                    logger.info(f"Recovered {ghost_recovered} ghost generations")
+
                 # Check for completed jobs
                 completed_jobs = self._check_completed_jobs()
 
@@ -640,22 +645,23 @@ class EvolutionRunner:
         have at least one program in the database. This ensures the count
         advances sequentially without gaps.
         """
-        last_gen = self.db.last_iteration
-        if last_gen == -1:
-            self.completed_generations = 0
-            return
-
-        # Check for contiguous generations from 0 up to last_gen
-        completed_up_to = 0
-        for i in range(last_gen + 1):
-            if self.db.get_programs_by_generation(i):
-                completed_up_to = i + 1
-            else:
-                # Found a gap, so contiguous sequence is broken
-                self.completed_generations = completed_up_to
+        with self._db_lock:
+            last_gen = self.db.last_iteration
+            if last_gen == -1:
+                self.completed_generations = 0
                 return
 
-        self.completed_generations = completed_up_to
+            # Check for contiguous generations from 0 up to last_gen
+            completed_up_to = 0
+            for i in range(last_gen + 1):
+                if self.db.get_programs_by_generation(i):
+                    completed_up_to = i + 1
+                else:
+                    # Found a gap, so contiguous sequence is broken
+                    self.completed_generations = completed_up_to
+                    return
+
+            self.completed_generations = completed_up_to
 
     def _submit_new_job(self):
         """Submit a new job to the queue (thread-safe)."""
@@ -806,6 +812,78 @@ class EvolutionRunner:
                 f"queue size: {len(self.running_jobs)}"
             )
 
+    def _recover_ghost_generations(self) -> int:
+        """
+        Recover 'ghost generations' - generations where main.py exists but scorer never ran.
+
+        This can happen when job submission fails due to database concurrency errors
+        (e.g., 'Recursive use of cursors not allowed').
+
+        Returns:
+            Number of ghost generations recovered
+        """
+        recovered = 0
+        running_gens = {job.generation for job in self.running_jobs}
+
+        # Scan for generations with main.py but no metrics.json
+        for gen_idx in range(self.next_generation_to_submit):
+            if gen_idx in running_gens:
+                continue  # Already in queue
+
+            gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{gen_idx}"
+            main_file = gen_dir / f"main.{self.lang_ext}"
+            results_dir = gen_dir / "results"
+            metrics_file = results_dir / "metrics.json"
+
+            # Check if this is a ghost generation
+            if main_file.exists() and not metrics_file.exists():
+                # Check if there's already a scorer running (job_log files exist and are recent)
+                job_log = results_dir / "job_log.out"
+                if job_log.exists():
+                    # Log file exists, scorer may have run but failed - skip
+                    continue
+
+                # This is a ghost generation - resubmit scorer
+                logger.warning(
+                    f"Recovering ghost generation {gen_idx}: "
+                    f"main.py exists but scorer never ran"
+                )
+
+                try:
+                    # Ensure results directory exists
+                    results_dir.mkdir(parents=True, exist_ok=True)
+
+                    # Submit the scorer job
+                    job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
+
+                    # Add to running jobs with minimal metadata
+                    running_job = RunningJob(
+                        job_id=job_id,
+                        exec_fname=str(main_file),
+                        results_dir=str(results_dir),
+                        start_time=time.time(),
+                        generation=gen_idx,
+                        parent_id=None,  # Unknown for recovered jobs
+                        archive_insp_ids=[],
+                        top_k_insp_ids=[],
+                        code_diff=None,
+                        meta_patch_data={"recovered_ghost": True},
+                        code_embedding=None,
+                        embed_cost=0.0,
+                        novelty_cost=0.0,
+                    )
+                    self.running_jobs.append(running_job)
+                    recovered += 1
+
+                    logger.info(
+                        f"Resubmitted scorer for ghost generation {gen_idx}, "
+                        f"queue size: {len(self.running_jobs)}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to recover ghost generation {gen_idx}: {e}")
+
+        return recovered
+
     def _check_completed_jobs(self) -> List[RunningJob]:
         """Check for completed jobs and return them."""
         completed = []
@@ -890,75 +968,79 @@ class EvolutionRunner:
                 "stderr_log": stderr_log,
             },
         )
-        self.db.add(db_program, verbose=True)
 
-        # Add the evaluated program to meta memory tracking
-        self.meta_summarizer.add_evaluated_program(db_program)
+        # Protect ALL database operations with lock to prevent
+        # "Recursive use of cursors" error when worker threads run concurrently
+        with self._db_lock:
+            self.db.add(db_program, verbose=True)
 
-        # Check if we should update meta memory after adding this program
-        if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
-            logger.info(
-                f"Updating meta memory after processing "
-                f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
-            )
-            best_program = self.db.get_best_program()
-            updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
-                best_program
-            )
-            if updated_recs:
-                # Write meta output file using accumulated program count
-                self.meta_summarizer.write_meta_output(str(self.results_dir))
-                # Store meta cost for tracking
-                if meta_cost > 0:
-                    logger.info(
-                        f"Meta recommendation generation cost: ${meta_cost:.4f}"
-                    )
-                    # Add meta cost to this program's metadata (the one that triggered the update)
-                    if db_program.metadata is None:
-                        db_program.metadata = {}
-                    db_program.metadata["meta_cost"] = meta_cost
-                    # Update the program in the database with the new metadata
-                    metadata_json = json.dumps(db_program.metadata)
-                    self.db.cursor.execute(
-                        "UPDATE programs SET metadata = ? WHERE id = ?",
-                        (metadata_json, db_program.id),
-                    )
-                    self.db.conn.commit()
+            # Add the evaluated program to meta memory tracking
+            self.meta_summarizer.add_evaluated_program(db_program)
 
-        if self.llm_selection is not None:
-            if "model_name" not in db_program.metadata:
-                logger.warning(
-                    "No model_name found in program metadata, "
-                    "unable to update model selection algorithm."
+            # Check if we should update meta memory after adding this program
+            if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
+                logger.info(
+                    f"Updating meta memory after processing "
+                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
                 )
-            else:
-                parent = (
-                    self.db.get(db_program.parent_id) if db_program.parent_id else None
+                best_program = self.db.get_best_program()
+                updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
+                    best_program
                 )
-                baseline = parent.combined_score if parent else None
-                reward = db_program.combined_score if correct_val else None
-                model_name = db_program.metadata["model_name"]
-                result = self.llm_selection.update(
-                    arm=model_name,
-                    reward=reward,
-                    baseline=baseline,
-                )
-                if result and self.verbose:
-                    normalized_score, baseline = result
+                if updated_recs:
+                    # Write meta output file using accumulated program count
+                    self.meta_summarizer.write_meta_output(str(self.results_dir))
+                    # Store meta cost for tracking
+                    if meta_cost > 0:
+                        logger.info(
+                            f"Meta recommendation generation cost: ${meta_cost:.4f}"
+                        )
+                        # Add meta cost to this program's metadata (the one that triggered the update)
+                        if db_program.metadata is None:
+                            db_program.metadata = {}
+                        db_program.metadata["meta_cost"] = meta_cost
+                        # Update the program in the database with the new metadata
+                        metadata_json = json.dumps(db_program.metadata)
+                        self.db.cursor.execute(
+                            "UPDATE programs SET metadata = ? WHERE id = ?",
+                            (metadata_json, db_program.id),
+                        )
+                        self.db.conn.commit()
 
-                    def fmt(x):
-                        return f"{x:.4f}" if isinstance(x, (float, int)) else "None"
-
-                    logger.debug(
-                        f"==> UPDATED LLM SELECTION: model: "
-                        f"{model_name.split('/')[-1][-25:]}..., "
-                        f"score: {fmt(normalized_score)}, "
-                        f"raw score: {fmt(reward)}, baseline: {fmt(baseline)}"
+            if self.llm_selection is not None:
+                if "model_name" not in db_program.metadata:
+                    logger.warning(
+                        "No model_name found in program metadata, "
+                        "unable to update model selection algorithm."
                     )
-                    self.llm_selection.print_summary()
+                else:
+                    parent = (
+                        self.db.get(db_program.parent_id) if db_program.parent_id else None
+                    )
+                    baseline = parent.combined_score if parent else None
+                    reward = db_program.combined_score if correct_val else None
+                    model_name = db_program.metadata["model_name"]
+                    result = self.llm_selection.update(
+                        arm=model_name,
+                        reward=reward,
+                        baseline=baseline,
+                    )
+                    if result and self.verbose:
+                        normalized_score, baseline = result
 
-        self.db.save()
-        self._update_best_solution()
+                        def fmt(x):
+                            return f"{x:.4f}" if isinstance(x, (float, int)) else "None"
+
+                        logger.debug(
+                            f"==> UPDATED LLM SELECTION: model: "
+                            f"{model_name.split('/')[-1][-25:]}..., "
+                            f"score: {fmt(normalized_score)}, "
+                            f"raw score: {fmt(reward)}, baseline: {fmt(baseline)}"
+                        )
+                        self.llm_selection.print_summary()
+
+            self.db.save()
+            self._update_best_solution()
 
         # Note: Meta summarization check is now done after completed generations
         # are updated in the main loop to ensure correct timing
