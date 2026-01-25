@@ -1,6 +1,7 @@
 import json
 import shutil
 import sys
+import signal
 import uuid
 import time
 import logging
@@ -312,6 +313,26 @@ class EvolutionRunner:
 
     def run(self):
         """Run evolution with parallel job queue."""
+        # Set up signal handler for clean shutdown on Ctrl+C
+        def graceful_shutdown(signum, frame):
+            logger.info("")
+            logger.info("=" * 60)
+            logger.info("INTERRUPT RECEIVED - Saving state before exit...")
+            logger.info("=" * 60)
+            try:
+                # Save all state to disk
+                self._save_meta_memory()  # Also saves LLM selection state
+                self.db.save()
+                logger.info("State saved successfully. Safe to exit.")
+                logger.info(f"Resume with: --resume {self.results_dir}")
+            except Exception as e:
+                logger.error(f"Error saving state: {e}")
+            logger.info("=" * 60)
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        signal.signal(signal.SIGTERM, graceful_shutdown)
+
         max_jobs = self.evo_config.max_parallel_jobs
         target_gens = self.evo_config.num_generations
         logger.info(
