@@ -744,16 +744,31 @@ class EvolutionRunner:
                     break
 
                 # Use NoveltyJudge for novelty assessment with rejection sampling
-                if self.novelty_judge.should_check_novelty(
-                    code_embedding, current_gen, parent_program, self.db
-                ):
-                    should_accept, novelty_metadata = (
-                        self.novelty_judge.assess_novelty_with_rejection_sampling(
-                            exec_fname, code_embedding, parent_program, self.db
-                        )
+                # Protect all DB accesses during novelty assessment with lock
+                with self._db_lock:
+                    should_check = self.novelty_judge.should_check_novelty(
+                        code_embedding, current_gen, parent_program, self.db
                     )
+                    if should_check:
+                        should_accept, novelty_metadata = (
+                            self.novelty_judge.assess_novelty_with_rejection_sampling(
+                                exec_fname, code_embedding, parent_program, self.db
+                            )
+                        )
+                    else:
+                        should_accept = True  # Skip novelty check
+                        novelty_metadata = {}
+                        if not self.db.island_manager or not hasattr(
+                            self.db.island_manager, "are_all_islands_initialized"
+                        ):
+                            self.novelty_judge.log_novelty_skip_message("no island manager")
+                        elif not self.db.island_manager.are_all_islands_initialized():
+                            self.novelty_judge.log_novelty_skip_message(
+                                "not all islands initialized yet"
+                            )
 
-                    # Update costs and metadata from novelty assessment
+                # Update costs and metadata from novelty assessment (outside lock)
+                if novelty_metadata:
                     novelty_cost += novelty_metadata.get("novelty_total_cost", 0.0)
                     novelty_checks_performed = novelty_metadata.get(
                         "novelty_checks_performed", 0
@@ -762,19 +777,9 @@ class EvolutionRunner:
                         "novelty_explanation", ""
                     )
 
-                    if should_accept:
-                        break
-                    # If not accepted, continue to next attempt (rejection sampling)
-                else:
-                    if not self.db.island_manager or not hasattr(
-                        self.db.island_manager, "are_all_islands_initialized"
-                    ):
-                        self.novelty_judge.log_novelty_skip_message("no island manager")
-                    elif not self.db.island_manager.are_all_islands_initialized():
-                        self.novelty_judge.log_novelty_skip_message(
-                            "not all islands initialized yet"
-                        )
+                if should_accept:
                     break
+                # If not accepted, continue to next attempt (rejection sampling)
 
         # Add meta-recommendations/summary/scratchpad to meta_patch_data
         if meta_recs is not None:
