@@ -2655,18 +2655,20 @@ ${'='.repeat(80)}
             }
 
             // Organize databases by task
+            // Path structure: "results_dir/path/to/db.sqlite" or "primary_run/path/to/db.sqlite"
+            // Use the FIRST part of the path as the task/results directory name
             dbs.forEach(db => {
                 const pathParts = db.path.split('/');
-                if (pathParts.length >= 3) {
-                    const task = pathParts[pathParts.length - 3]; // Third to last part is the task
-                    const result = pathParts[pathParts.length - 2]; // Second to last part is the result
-                    
+                if (pathParts.length >= 1) {
+                    // First part of path is the results directory (e.g., "primary_run", "results_20260124_222103")
+                    const task = pathParts[0];
+
                     if (!tasksAndResults[task]) {
                         tasksAndResults[task] = [];
                     }
-                    
+
                     tasksAndResults[task].push({
-                        name: result, // No need to remove extension since this is a directory name
+                        name: db.name || pathParts[pathParts.length - 1], // Use API's display name
                         path: db.path,
                         sortKey: db.sort_key || '0'
                     });
