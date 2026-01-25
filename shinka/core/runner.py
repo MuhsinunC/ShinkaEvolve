@@ -5,7 +5,7 @@ import time
 import logging
 import yaml
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from rich.logging import RichHandler
 from rich.table import Table
 from rich.console import Console
@@ -368,15 +368,32 @@ class EvolutionRunner:
                             future = self._llm_executor.submit(self._submit_new_job)
                             futures.append(future)
 
-                    # Wait for all submissions to complete
-                    for future in as_completed(futures):
-                        try:
-                            future.result()  # Raises any exceptions from the thread
-                        except Exception as e:
-                            logger.error(f"Error in parallel job submission: {e}")
+                    # Process completions while waiting for LLM submissions (non-blocking)
+                    pending_futures = set(futures)
+                    while pending_futures:
+                        # Check for completed evaluation jobs
+                        completed_jobs = self._check_completed_jobs()
+                        if completed_jobs:
+                            for job in completed_jobs:
+                                self._process_completed_job(job)
+                            self._update_completed_generations()
+                            if self.verbose:
+                                logger.info(
+                                    f"Processed {len(completed_jobs)} jobs. "
+                                    f"Total completed generations: "
+                                    f"{self.completed_generations}/{target_gens}"
+                                )
 
-                # Wait a bit before checking again
-                time.sleep(2)
+                        # Non-blocking check of LLM submissions (0.5s timeout)
+                        done, pending_futures = wait(pending_futures, timeout=0.5, return_when=FIRST_COMPLETED)
+                        for future in done:
+                            try:
+                                future.result()
+                            except Exception as e:
+                                logger.error(f"Error in parallel job submission: {e}")
+                else:
+                    # No jobs to submit, just wait a bit
+                    time.sleep(0.5)
 
             # All jobs are now handled by the main loop above
 
@@ -1090,7 +1107,7 @@ class EvolutionRunner:
                 persist_dir.mkdir(parents=True, exist_ok=True)
                 persist_path = persist_dir / f"llm_response_attempt_{patch_attempt + 1}.json"
                 try:
-                    with persist_path.open('w') as f:
+                    with persist_path.open('w', encoding='utf-8') as f:
                         json.dump(early_persist_metadata, f, indent=2)
                     if self.verbose:
                         logger.debug(f"Persisted LLM response to {persist_path}")
