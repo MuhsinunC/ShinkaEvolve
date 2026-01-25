@@ -1,3 +1,4 @@
+import json
 import shutil
 import uuid
 import time
@@ -605,8 +606,6 @@ class EvolutionRunner:
                         db_program.metadata = {}
                     db_program.metadata["meta_cost"] = meta_cost
                     # Update the program in the database with the new metadata
-                    import json
-
                     metadata_json = json.dumps(db_program.metadata)
                     self.db.cursor.execute(
                         "UPDATE programs SET metadata = ? WHERE id = ?",
@@ -902,8 +901,6 @@ class EvolutionRunner:
                         db_program.metadata = {}
                     db_program.metadata["meta_cost"] = meta_cost
                     # Update the program in the database with the new metadata
-                    import json
-
                     metadata_json = json.dumps(db_program.metadata)
                     self.db.cursor.execute(
                         "UPDATE programs SET metadata = ? WHERE id = ?",
@@ -1028,6 +1025,7 @@ class EvolutionRunner:
             self.llm_selection.update_submitted(model_name)
         code_diff = None  # Initialize code_diff
         num_applied_attempt = 0  # Initialize num_applied_attempt
+        early_persist_metadata = {}  # Initialize early persistence metadata
         error_attempt = (
             "Max attempts reached without successful patch."  # Default error
         )
@@ -1069,6 +1067,36 @@ class EvolutionRunner:
                     break
 
             total_costs += response.cost  # Acc. cost
+
+            # IMMEDIATE PERSISTENCE: Store LLM response metadata before evaluation
+            # This ensures we don't lose responses if evaluation crashes
+            early_persist_metadata = {
+                "llm_response_archived": True,
+                "llm_response_timestamp": datetime.now().isoformat(),
+                "llm_model": response.model_name or llm_kwargs.get('model_name', 'unknown'),
+                "llm_input_tokens": response.input_tokens,
+                "llm_output_tokens": response.output_tokens,
+                "llm_cost": response.cost,
+                "llm_raw_content": response.content[:10000] if response.content else None,
+                "generation": generation,
+                "patch_attempt": patch_attempt + 1,
+                "parent_id": parent_program.id if parent_program else None,
+            }
+
+            # IMMEDIATE FILE PERSISTENCE: Write to file before evaluation
+            # This provides crash protection - the response is saved even if evaluation crashes
+            if early_persist_metadata.get("llm_response_archived"):
+                persist_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{generation}"
+                persist_dir.mkdir(parents=True, exist_ok=True)
+                persist_path = persist_dir / f"llm_response_attempt_{patch_attempt + 1}.json"
+                try:
+                    with persist_path.open('w') as f:
+                        json.dump(early_persist_metadata, f, indent=2)
+                    if self.verbose:
+                        logger.debug(f"Persisted LLM response to {persist_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to persist LLM response: {e}")
+
             patch_name = extract_between(
                 response.content,
                 "<NAME>",
@@ -1140,6 +1168,8 @@ class EvolutionRunner:
             diff_summary = diff_summary[original_filename]
 
         meta_edit_data = {
+            # Early persist metadata (LLM response captured immediately after receipt)
+            **early_persist_metadata,
             "patch_type": patch_type,
             "api_costs": total_costs,
             "num_applied": num_applied_attempt,
