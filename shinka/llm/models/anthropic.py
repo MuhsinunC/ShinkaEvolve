@@ -8,8 +8,9 @@ import json
 logger = logging.getLogger(__name__)
 
 
-MAX_TRIES = 50      # Increased: allow more retries for long cooldowns
-MAX_VALUE = 600     # Increased: max backoff 10 minutes (API cooldowns can be 8+ min)
+# Infinite retries - user must manually stop if they want to abort
+# Exponential backoff caps at 5 minutes between retries
+MAX_BACKOFF_SECONDS = 300  # 5 minutes max wait between retries
 
 # JSON schema for structured diff output - guarantees Claude follows the format
 DIFF_OUTPUT_SCHEMA = {
@@ -80,18 +81,20 @@ def json_to_diff_format(json_response: dict) -> str:
 
 
 def backoff_handler(details):
+    """Log each retry attempt with clear error and wait time."""
     exc = details.get("exception")
-    if exc:
-        logger.info(
-            f"Anthropic - Retry {details['tries']} due to error: {exc}. Waiting {details['wait']:0.1f}s..."
-        )
+    wait_time = details.get("wait", 0)
+    tries = details.get("tries", 0)
 
+    # Format wait time nicely
+    if wait_time >= 60:
+        wait_str = f"{wait_time / 60:.1f} minutes"
+    else:
+        wait_str = f"{wait_time:.0f} seconds"
 
-def giveup_handler(details):
-    """Log when all retries are exhausted."""
-    exc = details.get("exception")
-    logger.error(
-        f"Anthropic - GIVING UP after {details['tries']} retries. Last error: {exc}"
+    logger.warning(
+        f"API CALL FAILED (attempt {tries}): {exc}\n"
+        f"    Retrying in {wait_str}..."
     )
 
 
@@ -103,10 +106,9 @@ def giveup_handler(details):
         anthropic.RateLimitError,
         anthropic.APITimeoutError,
     ),
-    max_tries=MAX_TRIES,
-    max_value=MAX_VALUE,
+    max_value=MAX_BACKOFF_SECONDS,  # Cap backoff at 5 minutes
+    # No max_tries = infinite retries until success or manual stop
     on_backoff=backoff_handler,
-    on_giveup=giveup_handler,
 )
 def query_anthropic(
     client,
