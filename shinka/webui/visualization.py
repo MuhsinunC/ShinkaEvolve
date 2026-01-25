@@ -82,6 +82,14 @@ class DatabaseRequestHandler(http.server.SimpleHTTPRequestHandler):
         # Serve static files from the webui directory
         return http.server.SimpleHTTPRequestHandler.do_GET(self)
 
+    def end_headers(self):
+        """Add cache-control headers for HTML files."""
+        if hasattr(self, 'path') and self.path.endswith('.html'):
+            self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+            self.send_header('Pragma', 'no-cache')
+            self.send_header('Expires', '0')
+        super().end_headers()
+
     def handle_list_databases(self):
         """Scan the search root directory for .db files."""
         print(
