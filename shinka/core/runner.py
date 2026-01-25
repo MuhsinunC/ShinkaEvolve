@@ -265,6 +265,7 @@ class EvolutionRunner:
         if resuming_run:
             self.completed_generations = self.db.last_iteration + 1
             self.next_generation_to_submit = self.completed_generations
+            self.session_start_generation = self.completed_generations  # Track session start
             logger.info("=" * 80)
             logger.info("RESUMING PREVIOUS EVOLUTION RUN")
             logger.info("=" * 80)
@@ -277,8 +278,11 @@ class EvolutionRunner:
             self._update_best_solution()
             # Restore meta memory state when resuming
             self._restore_meta_memory()
+            # Restore LLM selection bandit state when resuming
+            self._restore_llm_selection_state()
         else:
             self.completed_generations = 0
+            self.session_start_generation = 0  # Track session start
 
         # Save experiment configuration to a YAML file
         self._save_experiment_config(evo_config, job_config, db_config)
@@ -343,10 +347,11 @@ class EvolutionRunner:
                     self._update_completed_generations()
 
                     if self.verbose:
+                        session_progress = self.completed_generations - self.session_start_generation
                         logger.info(
                             f"Processed {len(completed_jobs)} jobs. "
-                            f"Total completed generations: "
-                            f"{self.completed_generations}/{target_gens}"
+                            f"Total generations: {self.completed_generations}/{target_gens} "
+                            f"({session_progress} this session)"
                         )
 
                 # Check if we've completed all generations
@@ -384,10 +389,11 @@ class EvolutionRunner:
                                 self._process_completed_job(job)
                             self._update_completed_generations()
                             if self.verbose:
+                                session_progress = self.completed_generations - self.session_start_generation
                                 logger.info(
                                     f"Processed {len(completed_jobs)} jobs. "
-                                    f"Total completed generations: "
-                                    f"{self.completed_generations}/{target_gens}"
+                                    f"Total generations: {self.completed_generations}/{target_gens} "
+                                    f"({session_progress} this session)"
                                 )
 
                         # Non-blocking check of LLM submissions (0.5s timeout)
@@ -646,27 +652,16 @@ class EvolutionRunner:
     def _update_completed_generations(self):
         """
         Update the count of completed generations from the database.
-        A generation `g` is considered complete if all generations from 0..g
-        have at least one program in the database. This ensures the count
-        advances sequentially without gaps.
+        Uses the maximum generation number (0-indexed), not contiguous count.
+        This gives accurate progress reporting even with gaps in generation numbers.
         """
         with self._db_lock:
             last_gen = self.db.last_iteration
             if last_gen == -1:
                 self.completed_generations = 0
-                return
-
-            # Check for contiguous generations from 0 up to last_gen
-            completed_up_to = 0
-            for i in range(last_gen + 1):
-                if self.db.get_programs_by_generation(i):
-                    completed_up_to = i + 1
-                else:
-                    # Found a gap, so contiguous sequence is broken
-                    self.completed_generations = completed_up_to
-                    return
-
-            self.completed_generations = completed_up_to
+            else:
+                # Use max generation + 1 as the count (0-indexed)
+                self.completed_generations = last_gen + 1
 
     def _submit_new_job(self):
         """Submit a new job to the queue (thread-safe)."""
@@ -1505,9 +1500,11 @@ class EvolutionRunner:
         self.console.print(table)
 
     def _save_meta_memory(self) -> None:
-        """Save the meta memory state to disk."""
+        """Save the meta memory state and LLM selection state to disk."""
         meta_memory_path = Path(self.results_dir) / "meta_memory.json"
         self.meta_summarizer.save_meta_state(str(meta_memory_path))
+        # Also save LLM selection state to keep in sync
+        self._save_llm_selection_state()
 
     def _restore_meta_memory(self) -> None:
         """Restore the meta memory state from disk."""
@@ -1526,3 +1523,42 @@ class EvolutionRunner:
                 )
             else:
                 logger.info("No previous meta memory state found - starting fresh")
+
+    def _save_llm_selection_state(self) -> None:
+        """Save the LLM selection bandit state to disk."""
+        if self.llm_selection is None:
+            return
+        if not hasattr(self.llm_selection, 'to_dict'):
+            return
+
+        state_path = Path(self.results_dir) / "llm_selection_state.json"
+        try:
+            state = self.llm_selection.to_dict()
+            with state_path.open('w', encoding='utf-8') as f:
+                json.dump(state, f, indent=2)
+            logger.debug(f"Saved LLM selection state to {state_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save LLM selection state: {e}")
+
+    def _restore_llm_selection_state(self) -> None:
+        """Restore the LLM selection bandit state from disk."""
+        if self.llm_selection is None:
+            return
+        if not hasattr(self.llm_selection, 'from_dict'):
+            return
+
+        state_path = Path(self.results_dir) / "llm_selection_state.json"
+        if not state_path.exists():
+            logger.info("No previous LLM selection state found - starting fresh")
+            return
+
+        try:
+            with state_path.open('r', encoding='utf-8') as f:
+                state = json.load(f)
+            if self.llm_selection.from_dict(state):
+                logger.info("Successfully restored LLM selection state")
+                self.llm_selection.print_summary()
+            else:
+                logger.warning("LLM selection state exists but failed to load - starting fresh")
+        except Exception as e:
+            logger.warning(f"Failed to restore LLM selection state: {e}")

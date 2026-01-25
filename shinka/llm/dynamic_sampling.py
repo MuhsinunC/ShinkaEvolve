@@ -201,6 +201,61 @@ class AsymmetricUCB(BanditBase):
     def n(self) -> np.ndarray:
         return np.maximum(self.n_submitted, self.n_completed)
 
+    def to_dict(self) -> dict:
+        """Serialize bandit state to dictionary for persistence."""
+        return {
+            # State arrays
+            "n_submitted": self.n_submitted.tolist(),
+            "n_completed": self.n_completed.tolist(),
+            "s": self.s.tolist(),
+            "divs": self.divs.tolist(),
+            # Scalar state (handle inf values)
+            "_obs_max": float(self._obs_max) if np.isfinite(self._obs_max) else None,
+            "_obs_min": float(self._obs_min) if np.isfinite(self._obs_min) else None,
+            "_baseline": self._baseline,
+            # Config for validation on restore
+            "arm_names": self._arm_names,
+            "c": self.c,
+            "epsilon": self.epsilon,
+            "use_exponential_scaling": self.use_exponential_scaling,
+            "asymmetric_scaling": self.asymmetric_scaling,
+        }
+
+    def from_dict(self, state: dict) -> bool:
+        """Restore bandit state from dictionary. Returns True if successful."""
+        try:
+            # Validate arm names match
+            if state.get("arm_names") != self._arm_names:
+                return False
+
+            # Restore state arrays
+            self.n_submitted = np.array(state["n_submitted"], dtype=np.float64)
+            self.n_completed = np.array(state["n_completed"], dtype=np.float64)
+            self.s = np.array(state["s"], dtype=np.float64)
+            self.divs = np.array(state["divs"], dtype=np.float64)
+
+            # Restore scalar state (handle None -> inf)
+            obs_max = state.get("_obs_max")
+            if obs_max is not None:
+                self._obs_max = float(obs_max)
+            else:
+                self._obs_max = -np.inf
+
+            obs_min = state.get("_obs_min")
+            if obs_min is not None:
+                self._obs_min = float(obs_min)
+            else:
+                # Default depends on scaling mode
+                if self.use_exponential_scaling and self.asymmetric_scaling:
+                    self._obs_min = -np.inf
+                else:
+                    self._obs_min = np.inf
+
+            self._baseline = state.get("_baseline", 0.0)
+            return True
+        except (KeyError, ValueError, TypeError):
+            return False
+
     def _add_to_reward(self, r: float, value: float, coeff_r=1, coeff_value=1) -> float:
         if self.use_exponential_scaling:
             out, sign = logsumexp(

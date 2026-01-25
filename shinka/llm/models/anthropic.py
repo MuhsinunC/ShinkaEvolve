@@ -98,6 +98,32 @@ def backoff_handler(details):
     )
 
 
+def _is_client_error(exc):
+    """Check if exception is a client error (4xx) that shouldn't be retried.
+
+    Client errors indicate malformed requests that won't succeed on retry.
+    Server errors (5xx) and rate limits (429) should be retried.
+    """
+    # BadRequestError (400) - malformed request, don't retry
+    if isinstance(exc, anthropic.BadRequestError):
+        logger.error(f"CLIENT ERROR (400) - not retrying: {exc}")
+        return True
+    # AuthenticationError (401) - bad credentials, don't retry
+    if isinstance(exc, anthropic.AuthenticationError):
+        logger.error(f"AUTH ERROR (401) - not retrying: {exc}")
+        return True
+    # PermissionDeniedError (403) - forbidden, don't retry
+    if isinstance(exc, anthropic.PermissionDeniedError):
+        logger.error(f"PERMISSION ERROR (403) - not retrying: {exc}")
+        return True
+    # NotFoundError (404) - resource not found, don't retry
+    if isinstance(exc, anthropic.NotFoundError):
+        logger.error(f"NOT FOUND ERROR (404) - not retrying: {exc}")
+        return True
+    # All other errors (429 rate limit, 5xx server errors) should be retried
+    return False
+
+
 @backoff.on_exception(
     backoff.expo,
     (
@@ -109,6 +135,7 @@ def backoff_handler(details):
     max_value=MAX_BACKOFF_SECONDS,  # Cap backoff at 5 minutes
     # No max_tries = infinite retries until success or manual stop
     on_backoff=backoff_handler,
+    giveup=_is_client_error,  # Stop retrying on 4xx client errors
 )
 def query_anthropic(
     client,
@@ -198,17 +225,23 @@ def query_anthropic(
             content = response.content[1].text
     else:
         raise NotImplementedError("Pydantic output_model not supported for Anthropic.")
-    new_msg_history.append(
-        {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "text",
-                    "text": content,
-                }
-            ],
-        }
-    )
+
+    # Only add assistant message if content is non-empty
+    # Empty content would poison message history and cause 400 errors on subsequent requests
+    if content and content.strip():
+        new_msg_history.append(
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": content,
+                    }
+                ],
+            }
+        )
+    else:
+        logger.warning("Skipping empty assistant message - would poison message history")
     input_cost = CLAUDE_MODELS[model]["input_price"] * response.usage.input_tokens
     output_cost = CLAUDE_MODELS[model]["output_price"] * response.usage.output_tokens
     result = QueryResult(
