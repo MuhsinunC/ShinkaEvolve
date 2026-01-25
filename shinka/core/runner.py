@@ -709,6 +709,11 @@ class EvolutionRunner:
             top_k_insp_ids = []
             code_diff = None
             meta_patch_data = {}
+            # Defensive initialization - gen 0 should be handled by _run_generation_0()
+            # but initialize these for safety in case of unexpected code paths
+            code_embedding = None
+            embed_cost = 0.0
+            novelty_cost = 0.0
             # Initial program already copied in setup_initial_program
         else:
             api_costs = 0
@@ -953,8 +958,8 @@ class EvolutionRunner:
 
         # Use pre-computed embedding and novelty costs
         code_embedding = job.code_embedding
-        e_cost = job.embed_cost
-        n_cost = job.novelty_cost
+        e_cost = job.embed_cost if job.embed_cost is not None else 0.0
+        n_cost = job.novelty_cost if job.novelty_cost is not None else 0.0
         if self.verbose:
             logger.debug(
                 f"=> Using pre-computed embedding for job {job.job_id}, "
