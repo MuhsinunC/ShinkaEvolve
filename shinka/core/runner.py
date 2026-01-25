@@ -1096,6 +1096,61 @@ class EvolutionRunner:
                 f"Copied to {best_dir}"
             )
 
+        # Record to unified scoring system immediately (crash protection)
+        self._record_to_unified_scores(best_program, best_dir)
+
+    def _record_to_unified_scores(self, best_program, best_dir: Path):
+        """Record the best program to unified scoring system for crash protection.
+
+        This ensures that even if evolution is interrupted, the best kernels
+        found so far are recorded to scores/scores.csv and saved to scores/solutions/.
+        """
+        try:
+            # Find project root by looking for scores/record_score.py
+            results_path = Path(self.results_dir).resolve()
+            project_root = results_path.parent
+
+            # Check if this is a project with unified scoring
+            record_script = project_root / "scores" / "record_score.py"
+            if not record_script.exists():
+                return  # Not a project with unified scoring
+
+            # Get the kernel file
+            kernel_file = best_dir / f"main.{self.lang_ext}"
+            if not kernel_file.exists():
+                return
+
+            # Extract cycle count from program metrics
+            cycles = None
+            if best_program.public_metrics:
+                import json
+                try:
+                    metrics = json.loads(best_program.public_metrics) if isinstance(best_program.public_metrics, str) else best_program.public_metrics
+                    cycles = metrics.get('cycles')
+                except:
+                    pass
+
+            if cycles is None:
+                return  # Can't determine cycles
+
+            # Call record_score.py with --only-if-best
+            import subprocess
+            result = subprocess.run(
+                [sys.executable, str(record_script), '--only-if-best', str(kernel_file),
+                 f"Evolution gen {best_program.generation}"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                cwd=str(project_root)
+            )
+
+            if 'RECORDED' in result.stdout:
+                logger.info(f"NEW BEST recorded to unified scoring: {cycles} cycles")
+
+        except Exception as e:
+            # Don't let scoring failures affect evolution
+            logger.debug(f"Could not record to unified scores: {e}")
+
     def run_patch(
         self,
         parent_program: Program,
