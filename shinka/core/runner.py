@@ -330,11 +330,6 @@ class EvolutionRunner:
             while (
                 self.completed_generations < target_gens or len(self.running_jobs) > 0
             ):
-                # Recover any ghost generations (main.py exists but scorer never ran)
-                ghost_recovered = self._recover_ghost_generations()
-                if ghost_recovered > 0:
-                    logger.info(f"Recovered {ghost_recovered} ghost generations")
-
                 # Check for completed jobs
                 completed_jobs = self._check_completed_jobs()
 
@@ -376,6 +371,11 @@ class EvolutionRunner:
                     # Process completions while waiting for LLM submissions (non-blocking)
                     pending_futures = set(futures)
                     while pending_futures:
+                        # Recover any ghost generations (called frequently to minimize lost work)
+                        ghost_recovered = self._recover_ghost_generations()
+                        if ghost_recovered > 0:
+                            logger.info(f"Recovered {ghost_recovered} ghost generations")
+
                         # Check for completed evaluation jobs
                         completed_jobs = self._check_completed_jobs()
                         if completed_jobs:
@@ -396,6 +396,10 @@ class EvolutionRunner:
                                 future.result()
                             except Exception as e:
                                 logger.error(f"Error in parallel job submission: {e}")
+                                # Immediately try to recover ghost generations after errors
+                                recovered = self._recover_ghost_generations()
+                                if recovered > 0:
+                                    logger.info(f"Recovered {recovered} ghost generations after error")
                 else:
                     # No jobs to submit, just wait a bit
                     time.sleep(0.5)
@@ -824,6 +828,13 @@ class EvolutionRunner:
         """
         recovered = 0
         running_gens = {job.generation for job in self.running_jobs}
+
+        # Debug: log scanning range
+        if self.verbose:
+            logger.debug(
+                f"Ghost recovery: scanning gens 0-{self.next_generation_to_submit-1}, "
+                f"running: {sorted(running_gens)[:10]}..."
+            )
 
         # Scan for generations with main.py but no metrics.json
         for gen_idx in range(self.next_generation_to_submit):
