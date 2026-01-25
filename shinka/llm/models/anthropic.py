@@ -8,8 +8,8 @@ import json
 logger = logging.getLogger(__name__)
 
 
-MAX_TRIES = 20
-MAX_VALUE = 20
+MAX_TRIES = 50      # Increased: allow more retries for long cooldowns
+MAX_VALUE = 600     # Increased: max backoff 10 minutes (API cooldowns can be 8+ min)
 
 # JSON schema for structured diff output - guarantees Claude follows the format
 DIFF_OUTPUT_SCHEMA = {
@@ -87,6 +87,14 @@ def backoff_handler(details):
         )
 
 
+def giveup_handler(details):
+    """Log when all retries are exhausted."""
+    exc = details.get("exception")
+    logger.error(
+        f"Anthropic - GIVING UP after {details['tries']} retries. Last error: {exc}"
+    )
+
+
 @backoff.on_exception(
     backoff.expo,
     (
@@ -98,6 +106,7 @@ def backoff_handler(details):
     max_tries=MAX_TRIES,
     max_value=MAX_VALUE,
     on_backoff=backoff_handler,
+    on_giveup=giveup_handler,
 )
 def query_anthropic(
     client,
