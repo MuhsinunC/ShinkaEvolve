@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 import asyncio
 from dataclasses import dataclass, asdict, field
@@ -35,6 +36,7 @@ class LocalJobConfig(JobConfig):
 
     time: Optional[str] = None
     conda_env: Optional[str] = None
+    python_path: Optional[str] = None  # Custom python path (defaults to sys.executable)
 
 
 @dataclass
@@ -128,8 +130,14 @@ class JobScheduler:
                     results_dir_t,
                 ]
             else:
+                # Use custom python_path if specified, otherwise sys.executable
+                python_bin = "python"
+                if isinstance(self.config, LocalJobConfig) and self.config.python_path:
+                    python_bin = self.config.python_path
+                else:
+                    python_bin = sys.executable
                 cmd = [
-                    "python",
+                    python_bin,
                     f"{self.config.eval_program_path}",
                     "--program_path",
                     f"{exec_fname_t}",
