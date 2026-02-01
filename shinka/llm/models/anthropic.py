@@ -257,11 +257,12 @@ def query_anthropic(
     cache_creation_input_tokens = getattr(response.usage, 'cache_creation_input_tokens', 0) or 0
     cache_read_input_tokens = getattr(response.usage, 'cache_read_input_tokens', 0) or 0
 
-    # Log cache activity
+    # Log cache activity (always log to debug issues)
+    logger.info(f"API Cache metrics: write={cache_creation_input_tokens}, read={cache_read_input_tokens}, input={response.usage.input_tokens}")
     if cache_read_input_tokens > 0:
-        logger.debug(f"Cache HIT: {cache_read_input_tokens} tokens read from cache")
+        logger.info(f"Cache HIT: {cache_read_input_tokens} tokens read from cache")
     if cache_creation_input_tokens > 0:
-        logger.debug(f"Cache WRITE: {cache_creation_input_tokens} tokens written to cache")
+        logger.info(f"Cache WRITE: {cache_creation_input_tokens} tokens written to cache")
 
     # Calculate cost with cache pricing
     # Regular input tokens (not cached)

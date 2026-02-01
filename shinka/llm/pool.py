@@ -101,10 +101,13 @@ class LLMPool:
             with self._stats_lock:
                 if hasattr(result, 'cost') and result.cost:
                     self._stats.total_cost += result.cost
-                if hasattr(result, 'cache_read_input_tokens'):
-                    self._stats.total_cache_read_tokens += result.cache_read_input_tokens
-                if hasattr(result, 'cache_creation_input_tokens'):
-                    self._stats.total_cache_write_tokens += result.cache_creation_input_tokens
+                # Debug: Log cache token tracking
+                cache_read = getattr(result, 'cache_read_input_tokens', 0) or 0
+                cache_write = getattr(result, 'cache_creation_input_tokens', 0) or 0
+                if cache_read > 0 or cache_write > 0:
+                    logger.info(f"Pool tracking cache: read={cache_read}, write={cache_write}")
+                self._stats.total_cache_read_tokens += cache_read
+                self._stats.total_cache_write_tokens += cache_write
 
             return result
         finally:
