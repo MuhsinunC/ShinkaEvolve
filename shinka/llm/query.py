@@ -2,6 +2,7 @@ from typing import List, Union, Optional, Dict
 import random
 from pydantic import BaseModel
 from .client import get_client_llm
+from .pool import get_llm_pool
 from .models.pricing import (
     CLAUDE_MODELS,
     OPENAI_MODELS,
@@ -195,7 +196,52 @@ def query(
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
 ) -> QueryResult:
-    """Query the LLM."""
+    """Query the LLM through the global pool.
+
+    All LLM calls are routed through the centralized pool which provides:
+    - Concurrency control via semaphore (max N concurrent API calls)
+    - Global statistics tracking (total requests, costs)
+    - Rate limit protection across all callers
+
+    Args:
+        model_name: Name of the model to query
+        msg: User message
+        system_msg: System message
+        msg_history: Message history for multi-turn conversations
+        output_model: Optional Pydantic model for structured output
+        model_posteriors: Optional model posteriors for selection
+        **kwargs: Additional arguments passed to the model-specific query function
+
+    Returns:
+        QueryResult with response content, cost, tokens, etc.
+    """
+    pool = get_llm_pool()
+    return pool.submit(
+        _query_impl,
+        model_name,
+        msg,
+        system_msg,
+        msg_history,
+        output_model,
+        model_posteriors,
+        **kwargs
+    )
+
+
+def _query_impl(
+    model_name: str,
+    msg: str,
+    system_msg: str,
+    msg_history: List = [],
+    output_model: Optional[BaseModel] = None,
+    model_posteriors: Optional[Dict[str, float]] = None,
+    **kwargs,
+) -> QueryResult:
+    """Actual query implementation (internal).
+
+    This function is called through the LLMPool's submit() method,
+    which ensures concurrency control via semaphore.
+    """
     client, model_name = get_client_llm(
         model_name, structured_output=output_model is not None
     )

@@ -25,6 +25,7 @@ from shinka.llm import (
     EmbeddingClient,
     BanditBase,
     AsymmetricUCB,
+    configure_pool,
 )
 from shinka.edit import (
     apply_diff_patch,
@@ -104,6 +105,10 @@ class EvolutionRunner:
         self.job_config = job_config
         self.db_config = db_config
         self.verbose = verbose
+
+        # Initialize centralized LLM pool FIRST - before any LLM clients
+        # This ensures all LLM calls are throttled by max_parallel_jobs
+        self.llm_pool = configure_pool(max_concurrent=evo_config.max_parallel_jobs)
 
         print_gradient_logo((255, 0, 0), (255, 255, 255))
         if evo_config.results_dir is None:
@@ -443,6 +448,15 @@ class EvolutionRunner:
 
         self.db.print_summary()
         logger.info(f"Evolution completed! {self.completed_generations} generations")
+
+        # Log LLM pool statistics
+        pool_stats = self.llm_pool.get_stats()
+        logger.info(
+            f"LLM Pool Stats: {pool_stats['total_requests']} requests, "
+            f"peak concurrent: {pool_stats['peak_concurrent']}/{pool_stats['max_concurrent']}, "
+            f"total cost: ${pool_stats['total_cost']:.4f}"
+        )
+
         logger.info("=" * 80)
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         logger.info(f"Evolution run ended at {end_time}")

@@ -6,6 +6,12 @@ from .dynamic_sampling import (
     AsymmetricUCB,
     FixedSampler,
 )
+from .pool import (
+    LLMPool,
+    get_llm_pool,
+    configure_pool,
+    reset_pool,
+)
 
 __all__ = [
     "LLMClient",
@@ -15,4 +21,9 @@ __all__ = [
     "BanditBase",
     "AsymmetricUCB",
     "FixedSampler",
+    # LLM Pool
+    "LLMPool",
+    "get_llm_pool",
+    "configure_pool",
+    "reset_pool",
 ]
