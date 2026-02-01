@@ -153,6 +153,10 @@ def query_anthropic(
     the SEARCH/REPLACE format. The JSON output is converted back to standard
     DIFF format for compatibility with the rest of ShinkaEvolve.
     """
+    # Build user message (no cache_control - content varies due to inspiration programs)
+    # The inspiration programs are randomly sampled each call, so even for the same
+    # parent, the user message is different. Caching here would waste money on writes
+    # that never get read hits.
     new_msg_history = msg_history + [
         {
             "role": "user",
@@ -168,8 +172,9 @@ def query_anthropic(
     # Check if extended thinking is enabled
     has_thinking = "thinking" in kwargs
 
-    # Convert system_msg to cached format for prompt caching
-    # Cache has 5-min TTL; cache read = 10% cost, cache write = 125% cost
+    # System prompt with cache_control - this is static and benefits from caching
+    # Requires minimum tokens: 1024 for Sonnet/Opus, 2048 for Haiku
+    # Current system prompt is ~1250 tokens, so caching works for Sonnet/Opus only
     system_blocks = [
         {
             "type": "text",
