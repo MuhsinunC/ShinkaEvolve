@@ -27,6 +27,8 @@ class LLMPoolStats:
     active_requests: int = 0
     total_cost: float = 0.0
     peak_concurrent: int = 0
+    total_cache_read_tokens: int = 0
+    total_cache_write_tokens: int = 0
 
 
 class LLMPool:
@@ -95,10 +97,14 @@ class LLMPool:
         try:
             result = query_fn(*args, **kwargs)
 
-            # Track cost if available
+            # Track cost and cache metrics if available
             with self._stats_lock:
                 if hasattr(result, 'cost') and result.cost:
                     self._stats.total_cost += result.cost
+                if hasattr(result, 'cache_read_input_tokens'):
+                    self._stats.total_cache_read_tokens += result.cache_read_input_tokens
+                if hasattr(result, 'cache_creation_input_tokens'):
+                    self._stats.total_cache_write_tokens += result.cache_creation_input_tokens
 
             return result
         finally:
@@ -114,6 +120,8 @@ class LLMPool:
                 "peak_concurrent": self._stats.peak_concurrent,
                 "total_cost": self._stats.total_cost,
                 "max_concurrent": self.max_concurrent,
+                "total_cache_read_tokens": self._stats.total_cache_read_tokens,
+                "total_cache_write_tokens": self._stats.total_cache_write_tokens,
             }
 
     def reconfigure(self, max_concurrent: int) -> None:

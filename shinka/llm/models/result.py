@@ -17,6 +17,8 @@ class QueryResult:
         output_cost: float = 0.0,
         thought: str = "",
         model_posteriors: Optional[Dict[str, float]] = None,
+        cache_creation_input_tokens: int = 0,
+        cache_read_input_tokens: int = 0,
     ):
         self.content = content
         self.msg = msg
@@ -31,6 +33,8 @@ class QueryResult:
         self.output_cost = output_cost
         self.thought = thought
         self.model_posteriors = model_posteriors or {}
+        self.cache_creation_input_tokens = cache_creation_input_tokens
+        self.cache_read_input_tokens = cache_read_input_tokens
 
     def to_dict(self):
         return {
@@ -47,4 +51,6 @@ class QueryResult:
             "output_cost": self.output_cost,
             "thought": self.thought,
             "model_posteriors": self.model_posteriors,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
         }

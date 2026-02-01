@@ -168,6 +168,16 @@ def query_anthropic(
     # Check if extended thinking is enabled
     has_thinking = "thinking" in kwargs
 
+    # Convert system_msg to cached format for prompt caching
+    # Cache has 5-min TTL; cache read = 10% cost, cache write = 125% cost
+    system_blocks = [
+        {
+            "type": "text",
+            "text": system_msg,
+            "cache_control": {"type": "ephemeral"}
+        }
+    ]
+
     if output_model is None and has_thinking:
         # Use structured outputs with extended thinking
         # This guarantees Claude follows the SEARCH/REPLACE format
@@ -177,7 +187,7 @@ def query_anthropic(
         # Streaming is required when max_tokens > 21,333 (we use 40,000)
         with client.beta.messages.stream(
             model=model,
-            system=system_msg,
+            system=system_blocks,  # Cached system prompt
             messages=new_msg_history,
             betas=["structured-outputs-2025-11-13"],
             output_format={
@@ -211,7 +221,7 @@ def query_anthropic(
         # Use streaming without structured outputs (no extended thinking)
         with client.messages.stream(
             model=model,
-            system=system_msg,
+            system=system_blocks,  # Cached system prompt
             messages=new_msg_history,
             **kwargs,
         ) as stream:
@@ -242,8 +252,30 @@ def query_anthropic(
         )
     else:
         logger.warning("Skipping empty assistant message - would poison message history")
-    input_cost = CLAUDE_MODELS[model]["input_price"] * response.usage.input_tokens
+
+    # Extract cache metrics (available in Anthropic API response)
+    cache_creation_input_tokens = getattr(response.usage, 'cache_creation_input_tokens', 0) or 0
+    cache_read_input_tokens = getattr(response.usage, 'cache_read_input_tokens', 0) or 0
+
+    # Log cache activity
+    if cache_read_input_tokens > 0:
+        logger.debug(f"Cache HIT: {cache_read_input_tokens} tokens read from cache")
+    if cache_creation_input_tokens > 0:
+        logger.debug(f"Cache WRITE: {cache_creation_input_tokens} tokens written to cache")
+
+    # Calculate cost with cache pricing
+    # Regular input tokens (not cached)
+    regular_input = response.usage.input_tokens - cache_creation_input_tokens - cache_read_input_tokens
+
+    # Cache write = 1.25× input price, cache read = 0.10× input price
+    input_price = CLAUDE_MODELS[model]["input_price"]
+    input_cost = (
+        input_price * regular_input +
+        input_price * 1.25 * cache_creation_input_tokens +
+        input_price * 0.10 * cache_read_input_tokens
+    )
     output_cost = CLAUDE_MODELS[model]["output_price"] * response.usage.output_tokens
+
     result = QueryResult(
         content=content,
         msg=msg,
@@ -258,5 +290,7 @@ def query_anthropic(
         output_cost=output_cost,
         thought=thought,
         model_posteriors=model_posteriors,
+        cache_creation_input_tokens=cache_creation_input_tokens,
+        cache_read_input_tokens=cache_read_input_tokens,
     )
     return result
