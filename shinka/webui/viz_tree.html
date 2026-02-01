@@ -1186,6 +1186,14 @@
             </div>
             <div id="left-tab-content" style="flex-grow: 1; overflow: hidden; position: relative; height: calc(100vh - 200px);">
                 <div id="tree-view" class="left-content-section active">
+                    <div id="tree-zoom-controls" style="position: absolute; top: 10px; left: 10px; z-index: 1000; display: flex; flex-direction: column; gap: 5px; background: rgba(255,255,255,0.9); padding: 8px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.15);">
+                        <button id="zoom-in" title="Zoom In" style="width: 32px; height: 32px; font-size: 18px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: white;">+</button>
+                        <button id="zoom-out" title="Zoom Out" style="width: 32px; height: 32px; font-size: 18px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: white;">−</button>
+                        <button id="zoom-fit" title="Fit Entire Tree" style="width: 32px; height: 32px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: white;">Fit</button>
+                        <button id="zoom-best" title="Zoom to Best Node" style="width: 32px; height: 32px; font-size: 10px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: #fffacd;">★</button>
+                        <button id="zoom-reset" title="Reset Zoom" style="width: 32px; height: 32px; font-size: 12px; cursor: pointer; border: 1px solid #ccc; border-radius: 4px; background: white;">1:1</button>
+                        <div id="zoom-level" style="text-align: center; font-size: 11px; color: #666; margin-top: 4px;">100%</div>
+                    </div>
                     <div id="tree" style="height: 100%;"></div>
                 </div>
                 <div id="table-view" class="left-content-section">
@@ -3182,14 +3190,31 @@ ${'='.repeat(80)}
                 const panelWidth = treeView.offsetWidth;
                 const panelHeight = treeView.offsetHeight;
 
+                // Create zoom behavior with extended range for large trees
+                const zoomBehavior = d3.zoom()
+                    .extent([[0, 0], [panelWidth, panelHeight]])
+                    .scaleExtent([0.001, 100])  // Much wider range: 0.1% to 10000%
+                    .on("zoom", e => {
+                        g.attr("transform", e.transform);
+                        // Update zoom level display
+                        const zoomLevelEl = document.getElementById('zoom-level');
+                        if (zoomLevelEl) {
+                            zoomLevelEl.textContent = Math.round(e.transform.k * 100) + '%';
+                        }
+                    });
+
                 const svg = d3.select("#tree").append("svg")
                     .attr("width", panelWidth)
                     .attr("height", panelHeight)
                     .attr("preserveAspectRatio", "xMidYMid meet")
-                    .call(d3.zoom().extent([[0, 0], [panelWidth, panelHeight]]).scaleExtent([0.1, 8]).on("zoom", e => g.attr("transform", e.transform)))
+                    .call(zoomBehavior)
                     .append("g");
-                
+
                 const g = svg.append("g");
+
+                // Store zoom behavior and svg for controls
+                window.treeZoom = zoomBehavior;
+                window.treeSvg = d3.select("#tree svg");
 
                 // Create unified root structure for generation 0 programs
                 let processedData = [...data];
@@ -3840,29 +3865,37 @@ ${'='.repeat(80)}
                 // Add island index indicator with background
                 const islandNodes = node.filter(d => d.data.island_idx !== null && d.data.island_idx !== undefined);
                 
-                // Add background rectangle for island text
+                // Add background rectangle for island text - sized dynamically based on text length
                 islandNodes.append("rect")
-                    .attr("x", -15)
-                    .attr("y", -35)
-                    .attr("width", 30)
-                    .attr("height", 20)
-                    .attr("rx", 4)
+                    .attr("x", d => {
+                        const textLen = String(d.data.island_idx).length;
+                        const width = Math.max(36, textLen * 12 + 16);
+                        return -width / 2;
+                    })
+                    .attr("y", -42)
+                    .attr("width", d => {
+                        const textLen = String(d.data.island_idx).length;
+                        return Math.max(36, textLen * 12 + 16);
+                    })
+                    .attr("height", 24)
+                    .attr("rx", 5)
                     .style("fill", d => islandColorScale(d.data.island_idx))
                     .style("stroke", "#2c3e50")
-                    .style("stroke-width", "1px")
+                    .style("stroke-width", "2px")
                     .style("pointer-events", "none");
-                
+
                 // Add island text (centered in the rectangle)
                 islandNodes.append("text")
                     .attr("x", 0)
-                    .attr("y", -15)  // Adjusted for larger rectangle
+                    .attr("y", -30)
                     .attr("text-anchor", "middle")
-                    .attr("dy", "0.35em")  // Better vertical centering
-                    .style("font-size", "17px")
+                    .attr("dominant-baseline", "middle")
+                    .style("font-size", "14px")
                     .style("font-weight", "bold")
                     .style("fill", "white")
+                    .style("text-shadow", "0 1px 2px rgba(0,0,0,0.3)")
                     .style("pointer-events", "none")
-                    .text(d => `I${d.data.island_idx}`);
+                    .text(d => d.data.island_idx);
 
                 if (window.pendingNodeSelectionId) {
                     const nodeIdToSelect = window.pendingNodeSelectionId;
@@ -9624,12 +9657,92 @@ ${'='.repeat(80)}
 
                         // Add event listener for download button
         document.addEventListener('DOMContentLoaded', function() {
-            
+
             const downloadProgramsBtn = document.getElementById('download-programs-btn');
             if (downloadProgramsBtn) {
                 downloadProgramsBtn.addEventListener('click', downloadTopPrograms);
             }
-            
+
+            // Zoom control button handlers
+            document.getElementById('zoom-in').addEventListener('click', function() {
+                if (window.treeZoom && window.treeSvg) {
+                    window.treeSvg.transition().duration(300).call(window.treeZoom.scaleBy, 1.5);
+                }
+            });
+
+            document.getElementById('zoom-out').addEventListener('click', function() {
+                if (window.treeZoom && window.treeSvg) {
+                    window.treeSvg.transition().duration(300).call(window.treeZoom.scaleBy, 0.67);
+                }
+            });
+
+            document.getElementById('zoom-reset').addEventListener('click', function() {
+                if (window.treeZoom && window.treeSvg) {
+                    window.treeSvg.transition().duration(300).call(window.treeZoom.transform, d3.zoomIdentity);
+                    document.getElementById('zoom-level').textContent = '100%';
+                }
+            });
+
+            document.getElementById('zoom-fit').addEventListener('click', function() {
+                if (window.treeZoom && window.treeSvg) {
+                    const treeView = document.getElementById('tree-view');
+                    const svg = window.treeSvg.node();
+                    if (treeView && svg) {
+                        const viewBox = svg.getAttribute('viewBox');
+                        if (viewBox) {
+                            const [vbX, vbY, vbWidth, vbHeight] = viewBox.split(' ').map(Number);
+                            const svgWidth = parseFloat(svg.getAttribute('width'));
+                            const svgHeight = parseFloat(svg.getAttribute('height'));
+                            const scaleX = svgWidth / vbWidth;
+                            const scaleY = svgHeight / vbHeight;
+                            const scale = Math.min(scaleX, scaleY) * 0.9;
+                            const translateX = (svgWidth / 2) - (vbX + vbWidth/2) * scale;
+                            const translateY = (svgHeight / 2) - (vbY + vbHeight/2) * scale;
+                            window.treeSvg.transition().duration(500)
+                                .call(window.treeZoom.transform, d3.zoomIdentity.translate(translateX, translateY).scale(scale));
+                            document.getElementById('zoom-level').textContent = Math.round(scale * 100) + '%';
+                        }
+                    }
+                }
+            });
+
+            // Zoom to Best Node button - finds the gold (best) node and centers on it
+            document.getElementById('zoom-best').addEventListener('click', function() {
+                if (window.treeZoom && window.treeSvg) {
+                    const svg = window.treeSvg.node();
+                    // Find the gold (best) node by its fill color
+                    const paths = svg.querySelectorAll('g.nodes g.node path');
+                    let bestNodeG = null;
+                    for (const path of paths) {
+                        if (path.style.fill === 'rgb(255, 215, 0)') {
+                            bestNodeG = path.closest('g.node');
+                            break;
+                        }
+                    }
+                    if (bestNodeG) {
+                        const transform = bestNodeG.getAttribute('transform');
+                        const match = transform.match(/translate\(([^,]+),([^)]+)\)/);
+                        if (match) {
+                            const nodeX = parseFloat(match[1]);
+                            const nodeY = parseFloat(match[2]);
+                            const svgWidth = parseFloat(svg.getAttribute('width'));
+                            const svgHeight = parseFloat(svg.getAttribute('height'));
+                            const scale = 15; // 1500% zoom to see nodes clearly
+                            const translateX = svgWidth / 2 - nodeX * scale;
+                            const translateY = svgHeight / 2 - nodeY * scale;
+                            window.treeSvg.transition().duration(500)
+                                .call(window.treeZoom.transform, d3.zoomIdentity.translate(translateX, translateY).scale(scale));
+                            document.getElementById('zoom-level').textContent = '1500%';
+                            // Click the node to select it
+                            bestNodeG.dispatchEvent(new Event('click', { bubbles: true }));
+                        }
+                    } else {
+                        alert('Best node not found. Tree may not be loaded yet.');
+                    }
+                } else {
+                    alert('Tree not loaded. Select a database first.');
+                }
+            });
 
         });
 

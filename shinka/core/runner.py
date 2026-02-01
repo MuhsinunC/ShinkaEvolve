@@ -891,17 +891,32 @@ class EvolutionRunner:
                     # Ensure results directory exists
                     results_dir.mkdir(parents=True, exist_ok=True)
 
+                    # Try to recover parent_id from LLM response files
+                    parent_id = None
+                    for attempt in range(1, 6):  # Check up to 5 attempts
+                        llm_response_file = gen_dir / f"llm_response_attempt_{attempt}.json"
+                        if llm_response_file.exists():
+                            try:
+                                with open(llm_response_file, 'r') as f:
+                                    llm_data = json.load(f)
+                                    parent_id = llm_data.get("parent_id")
+                                    if parent_id:
+                                        logger.info(f"Recovered parent_id {parent_id} for ghost gen {gen_idx}")
+                                        break
+                            except Exception as e:
+                                logger.debug(f"Could not read LLM response file: {e}")
+
                     # Submit the scorer job
                     job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
 
-                    # Add to running jobs with minimal metadata
+                    # Add to running jobs with recovered metadata where possible
                     running_job = RunningJob(
                         job_id=job_id,
                         exec_fname=str(main_file),
                         results_dir=str(results_dir),
                         start_time=time.time(),
                         generation=gen_idx,
-                        parent_id=None,  # Unknown for recovered jobs
+                        parent_id=parent_id,  # Recovered from LLM response if available
                         archive_insp_ids=[],
                         top_k_insp_ids=[],
                         code_diff=None,

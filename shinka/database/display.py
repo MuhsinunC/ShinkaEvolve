@@ -468,7 +468,7 @@ class DatabaseDisplay:
                 str(prog.generation),
                 correct_str,
                 score_str,
-                f"{prog.complexity:.1f}",
+                f"{prog.complexity:.1f}" if prog.complexity is not None else "N/A",
                 prog.metadata.get("patch_name", "N/A")[:30],
                 prog.metadata.get("patch_type", "N/A")[:6],
                 island_display,
@@ -611,7 +611,7 @@ class DatabaseDisplay:
                 score_display,
                 patch_name,
                 patch_type,
-                f"{prog.complexity:.1f}",
+                f"{prog.complexity:.1f}" if prog.complexity is not None else "N/A",
                 cost_display,
                 time_display,
             ]
