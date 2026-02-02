@@ -264,6 +264,10 @@ class EvolutionRunner:
         # Threading lock for database operations and shared state
         self._db_lock = threading.Lock()
         self._generation_lock = threading.Lock()
+        self._jobs_lock = threading.Lock()  # Protects running_jobs list
+
+        # Shutdown flag - signal handler sets this, main thread checks it
+        self._shutdown_requested = threading.Event()
 
         # Thread pool for parallel LLM calls
         self._llm_executor = ThreadPoolExecutor(max_workers=evo_config.max_parallel_jobs)
@@ -290,6 +294,13 @@ class EvolutionRunner:
                 logger.info(f"Recovered {orphaned_recovered} orphaned results from previous session")
                 # Update completed generations count after recovery
                 self._update_completed_generations()
+
+            # Recover ghost generations (main.py exists but scorer never ran)
+            # This resubmits scorer jobs - they'll be processed in the main loop
+            # Note: We don't wait for these here; the main loop handles them
+            ghost_count = self._count_ghost_generations()
+            if ghost_count > 0:
+                logger.info(f"Found {ghost_count} ghost generations to recover (will resubmit in main loop)")
 
             self._update_best_solution()
             # Restore meta memory state when resuming
@@ -329,34 +340,14 @@ class EvolutionRunner:
     def run(self):
         """Run evolution with parallel job queue."""
         # Set up signal handler for clean shutdown on Ctrl+C
+        # IMPORTANT: Signal handler only sets flag - main thread does cleanup work
+        # This prevents deadlocks from acquiring locks in signal context
         def graceful_shutdown(signum, frame):
             logger.info("")
             logger.info("=" * 60)
-            logger.info("INTERRUPT RECEIVED - Processing completed jobs before exit...")
+            logger.info("INTERRUPT RECEIVED - Requesting graceful shutdown...")
             logger.info("=" * 60)
-            try:
-                # CRITICAL: Process any completed jobs before saving
-                # Without this, jobs where scorer finished but _process_completed_job
-                # hasn't run yet would be lost (metrics.json exists but not in database)
-                completed_jobs = self._check_completed_jobs()
-                if completed_jobs:
-                    logger.info(f"Processing {len(completed_jobs)} completed jobs before exit...")
-                    for job in completed_jobs:
-                        try:
-                            self._process_completed_job(job)
-                            logger.info(f"  Saved job for generation {job.generation}")
-                        except Exception as e:
-                            logger.error(f"  Failed to save job {job.generation}: {e}")
-
-                # Save all state to disk
-                self._save_meta_memory()  # Also saves LLM selection state
-                self.db.save()
-                logger.info("State saved successfully. Safe to exit.")
-                logger.info(f"Resume with: --resume {self.results_dir}")
-            except Exception as e:
-                logger.error(f"Error saving state: {e}")
-            logger.info("=" * 60)
-            sys.exit(0)
+            self._shutdown_requested.set()
 
         signal.signal(signal.SIGINT, graceful_shutdown)
         signal.signal(signal.SIGTERM, graceful_shutdown)
@@ -381,9 +372,16 @@ class EvolutionRunner:
             logger.info("Starting parallel execution for remaining generations...")
 
             # Main loop: monitor jobs and submit new ones
-            while (
-                self.completed_generations < target_gens or len(self.running_jobs) > 0
-            ):
+            while True:
+                with self._jobs_lock:
+                    has_running_jobs = len(self.running_jobs) > 0
+                if self.completed_generations >= target_gens and not has_running_jobs:
+                    break
+                # Check for shutdown request (set by signal handler)
+                if self._shutdown_requested.is_set():
+                    self._perform_graceful_shutdown()
+                    return
+
                 # Check for completed jobs
                 completed_jobs = self._check_completed_jobs()
 
@@ -409,7 +407,9 @@ class EvolutionRunner:
                     break
 
                 # Submit new jobs to fill the queue (parallel submission)
-                available_slots = max_jobs - len(self.running_jobs)
+                with self._jobs_lock:
+                    running_count = len(self.running_jobs)
+                available_slots = max_jobs - running_count
                 jobs_to_submit = min(
                     available_slots,
                     target_gens - self.next_generation_to_submit
@@ -426,6 +426,11 @@ class EvolutionRunner:
                     # Process completions while waiting for LLM submissions (non-blocking)
                     pending_futures = set(futures)
                     while pending_futures:
+                        # Check for shutdown request in inner loop too
+                        if self._shutdown_requested.is_set():
+                            self._perform_graceful_shutdown()
+                            return
+
                         # Recover any ghost generations (called frequently to minimize lost work)
                         ghost_recovered = self._recover_ghost_generations()
                         if ghost_recovered > 0:
@@ -871,14 +876,76 @@ class EvolutionRunner:
             embed_cost=embed_cost,
             novelty_cost=novelty_cost,
         )
-        with self._generation_lock:
+        with self._jobs_lock:
             self.running_jobs.append(running_job)
+            queue_size = len(self.running_jobs)
 
         if self.verbose:
             logger.info(
                 f"Submitted job for generation {current_gen}, "
-                f"queue size: {len(self.running_jobs)}"
+                f"queue size: {queue_size}"
             )
+
+    def _perform_graceful_shutdown(self):
+        """
+        Perform graceful shutdown - called from main thread when shutdown flag is set.
+
+        This processes completed jobs and saves state before exiting.
+        MUST be called from main thread (not signal handler) to avoid deadlocks.
+        """
+        logger.info("Performing graceful shutdown...")
+        try:
+            # Process any completed jobs before saving
+            # Without this, jobs where scorer finished but _process_completed_job
+            # hasn't run yet would be lost (metrics.json exists but not in database)
+            completed_jobs = self._check_completed_jobs()
+            if completed_jobs:
+                logger.info(f"Processing {len(completed_jobs)} completed jobs before exit...")
+                for job in completed_jobs:
+                    try:
+                        self._process_completed_job(job)
+                        logger.info(f"  Saved job for generation {job.generation}")
+                    except Exception as e:
+                        logger.error(f"  Failed to save job {job.generation}: {e}")
+
+            # Save all state to disk
+            self._save_meta_memory()  # Also saves LLM selection state
+            self.db.save()
+            logger.info("State saved successfully. Safe to exit.")
+            logger.info(f"Resume with: --resume {self.results_dir}")
+        except Exception as e:
+            logger.error(f"Error saving state: {e}")
+        logger.info("=" * 60)
+
+    def _count_ghost_generations(self) -> int:
+        """
+        Count ghost generations (main.py exists but scorer never ran) without recovering them.
+        Used on resume to report how many ghosts will be recovered in the main loop.
+        """
+        count = 0
+        with self._jobs_lock:
+            running_gens = {job.generation for job in self.running_jobs}
+
+        # Scan all gen_* directories to count ghosts
+        results_path = Path(self.results_dir)
+        for gen_dir in results_path.glob(f"{FOLDER_PREFIX}_*"):
+            try:
+                gen_idx = int(gen_dir.name.split("_")[1])
+            except (IndexError, ValueError):
+                continue
+
+            if gen_idx in running_gens:
+                continue
+
+            main_file = gen_dir / f"main.{self.lang_ext}"
+            metrics_file = gen_dir / "results" / "metrics.json"
+            job_log = gen_dir / "results" / "job_log.out"
+
+            # Ghost: main.py exists, no metrics.json, no job log (scorer never ran)
+            if main_file.exists() and not metrics_file.exists() and not job_log.exists():
+                count += 1
+
+        return count
 
     def _recover_ghost_generations(self) -> int:
         """
@@ -891,7 +958,8 @@ class EvolutionRunner:
             Number of ghost generations recovered
         """
         recovered = 0
-        running_gens = {job.generation for job in self.running_jobs}
+        with self._jobs_lock:
+            running_gens = {job.generation for job in self.running_jobs}
 
         # Debug: log scanning range
         if self.verbose:
@@ -962,12 +1030,14 @@ class EvolutionRunner:
                         embed_cost=0.0,
                         novelty_cost=0.0,
                     )
-                    self.running_jobs.append(running_job)
+                    with self._jobs_lock:
+                        self.running_jobs.append(running_job)
+                        queue_size = len(self.running_jobs)
                     recovered += 1
 
                     logger.info(
                         f"Resubmitted scorer for ghost generation {gen_idx}, "
-                        f"queue size: {len(self.running_jobs)}"
+                        f"queue size: {queue_size}"
                     )
                 except Exception as e:
                     logger.error(f"Failed to recover ghost generation {gen_idx}: {e}")
@@ -980,18 +1050,30 @@ class EvolutionRunner:
         but process crashed before _process_completed_job added the program to the database.
 
         This complements _recover_ghost_generations which handles missing metrics.json.
+        Scans ALL gen_* directories, not just up to next_generation_to_submit,
+        to catch orphans from any previous session.
 
         Returns:
             Number of orphaned results recovered
         """
         recovered = 0
-        running_gens = {job.generation for job in self.running_jobs}
+        with self._jobs_lock:
+            running_gens = {job.generation for job in self.running_jobs}
 
-        for gen_idx in range(1, self.next_generation_to_submit):  # Skip gen 0 (handled separately)
+        # Scan ALL gen_* directories, not just up to next_generation_to_submit
+        # This catches orphans from previous sessions with higher generation numbers
+        results_path = Path(self.results_dir)
+        for gen_dir in results_path.glob(f"{FOLDER_PREFIX}_*"):
+            try:
+                gen_idx = int(gen_dir.name.split("_")[1])
+            except (IndexError, ValueError):
+                continue  # Invalid directory name
+
+            if gen_idx == 0:
+                continue  # Skip gen 0 (handled separately)
             if gen_idx in running_gens:
                 continue  # Already being processed
 
-            gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{gen_idx}"
             main_file = gen_dir / f"main.{self.lang_ext}"
             results_dir_path = gen_dir / "results"
             metrics_file = results_dir_path / "metrics.json"
@@ -1110,11 +1192,14 @@ class EvolutionRunner:
         return recovered
 
     def _check_completed_jobs(self) -> List[RunningJob]:
-        """Check for completed jobs and return them."""
+        """Check for completed jobs and return them (thread-safe)."""
         completed = []
         still_running = []
 
-        for job in self.running_jobs:
+        with self._jobs_lock:
+            jobs_snapshot = list(self.running_jobs)
+
+        for job in jobs_snapshot:
             is_running = self.scheduler.check_job_status(job)
             if not is_running:
                 # Job completed
@@ -1125,7 +1210,11 @@ class EvolutionRunner:
                 # Job still running
                 still_running.append(job)
 
-        self.running_jobs = still_running
+        with self._jobs_lock:
+            # Only remove completed jobs from the list - new jobs may have been added
+            completed_gens = {job.generation for job in completed}
+            self.running_jobs = [j for j in self.running_jobs if j.generation not in completed_gens]
+
         return completed
 
     def _process_completed_job(self, job: RunningJob):
