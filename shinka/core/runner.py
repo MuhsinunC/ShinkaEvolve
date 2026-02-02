@@ -47,8 +47,8 @@ class EvolutionConfig:
     patch_types: List[str] = field(default_factory=lambda: ["diff"])
     patch_type_probs: List[float] = field(default_factory=lambda: [1.0])
     num_generations: int = 10
-    max_parallel_jobs: int = 2  # Max concurrent evaluation jobs
-    max_llm_concurrent: Optional[int] = None  # Max concurrent LLM API calls (defaults to max_parallel_jobs)
+    max_concurrent_evals: int = 2  # Max concurrent evaluation jobs
+    max_concurrent_llm: Optional[int] = None  # Max concurrent LLM API calls (defaults to max_concurrent_evals)
     max_patch_resamples: int = 3
     max_patch_attempts: int = 5
     job_type: str = "local"
@@ -69,6 +69,30 @@ class EvolutionConfig:
     novelty_llm_models: Optional[List[str]] = None
     novelty_llm_kwargs: dict = field(default_factory=lambda: {})
     use_text_feedback: bool = False
+    # Deprecated aliases (for backward compatibility)
+    max_parallel_jobs: Optional[int] = None  # DEPRECATED: use max_concurrent_evals
+    max_llm_concurrent: Optional[int] = None  # DEPRECATED: use max_concurrent_llm
+
+    def __post_init__(self):
+        # Handle deprecated aliases
+        if self.max_parallel_jobs is not None:
+            import warnings
+            warnings.warn(
+                "max_parallel_jobs is deprecated, use max_concurrent_evals instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if self.max_concurrent_evals == 2:  # Default wasn't changed
+                self.max_concurrent_evals = self.max_parallel_jobs
+        if self.max_llm_concurrent is not None:
+            import warnings
+            warnings.warn(
+                "max_llm_concurrent is deprecated, use max_concurrent_llm instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            if self.max_concurrent_llm is None:  # Default wasn't changed
+                self.max_concurrent_llm = self.max_llm_concurrent
 
 
 @dataclass
@@ -108,8 +132,8 @@ class EvolutionRunner:
         self.verbose = verbose
 
         # Initialize centralized LLM pool FIRST - before any LLM clients
-        # Use max_llm_concurrent if set, otherwise fall back to max_parallel_jobs
-        llm_concurrent = evo_config.max_llm_concurrent or evo_config.max_parallel_jobs
+        # Use max_concurrent_llm if set, otherwise fall back to max_concurrent_evals
+        llm_concurrent = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
         self.llm_pool = configure_pool(max_concurrent=llm_concurrent)
 
         print_gradient_logo((255, 0, 0), (255, 255, 255))
@@ -271,14 +295,14 @@ class EvolutionRunner:
         # Shutdown flag - signal handler sets this, main thread checks it
         self._shutdown_requested = threading.Event()
 
-        # Thread pool for parallel LLM calls - use max_llm_concurrent if set
-        llm_workers = evo_config.max_llm_concurrent or evo_config.max_parallel_jobs
+        # Thread pool for parallel LLM calls - use max_concurrent_llm if set
+        llm_workers = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
         self._llm_executor = ThreadPoolExecutor(max_workers=llm_workers)
-        self._max_llm_concurrent = llm_workers  # Store for later reference
+        self._max_concurrent_llm = llm_workers  # Store for later reference
 
-        # Evaluation slot semaphore - limits concurrent evaluations to max_parallel_jobs
+        # Evaluation slot semaphore - limits concurrent evaluations to max_concurrent_evals
         # This allows LLM calls to exceed evaluation capacity, building a backlog
-        self._eval_slot_semaphore = threading.Semaphore(evo_config.max_parallel_jobs)
+        self._eval_slot_semaphore = threading.Semaphore(evo_config.max_concurrent_evals)
         self._in_flight_llm_jobs = 0  # Track LLM jobs in progress (for logging)
         self._in_flight_llm_lock = threading.Lock()
 
@@ -375,11 +399,11 @@ class EvolutionRunner:
         signal.signal(signal.SIGINT, graceful_shutdown)
         signal.signal(signal.SIGTERM, graceful_shutdown)
 
-        max_jobs = self.evo_config.max_parallel_jobs
+        max_evals = self.evo_config.max_concurrent_evals
         target_gens = self.evo_config.num_generations
         logger.info(
-            f"Starting evolution with max_llm_concurrent={self._max_llm_concurrent}, "
-            f"max_eval_parallel={max_jobs}, target: {target_gens} generations"
+            f"Starting evolution with max_concurrent_llm={self._max_concurrent_llm}, "
+            f"max_concurrent_evals={max_evals}, target: {target_gens} generations"
         )
 
         # First, run generation 0 sequentially to populate the database
@@ -450,10 +474,10 @@ class EvolutionRunner:
                     break
 
                 # Submit new jobs to fill the LLM queue (parallel submission)
-                # Use max_llm_concurrent for LLM jobs, NOT max_parallel_jobs (which limits evals)
+                # Use max_concurrent_llm for LLM jobs, NOT max_concurrent_evals (which limits evals)
                 with self._in_flight_llm_lock:
                     in_flight = self._in_flight_llm_jobs
-                available_llm_slots = self._max_llm_concurrent - in_flight
+                available_llm_slots = self._max_concurrent_llm - in_flight
                 jobs_to_submit = min(
                     available_llm_slots,
                     target_gens - self.next_generation_to_submit

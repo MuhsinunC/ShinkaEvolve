@@ -153,31 +153,31 @@ The apparent "gap" (e.g., 5/20 in user's observation) likely occurs when:
 
 To allow saturating API rate limits while controlling evaluation compute, we implemented separate limits:
 
-**New Config Field:**
+**New Config Fields:**
 ```python
 class EvolutionConfig:
-    max_parallel_jobs: int = 2      # Max concurrent EVALUATION jobs
-    max_llm_concurrent: int = None  # Max concurrent LLM API calls (defaults to max_parallel_jobs)
+    max_concurrent_evals: int = 2       # Max concurrent EVALUATION jobs
+    max_concurrent_llm: int = None      # Max concurrent LLM API calls (defaults to max_concurrent_evals)
 ```
 
 **Usage Example:**
 ```python
 evo_config = EvolutionConfig(
-    max_parallel_jobs=60,      # Limit evaluations to 60 concurrent
-    max_llm_concurrent=800,    # Allow up to 800 concurrent LLM calls
+    max_concurrent_evals=60,   # Limit evaluations to 60 concurrent
+    max_concurrent_llm=800,    # Allow up to 800 concurrent LLM calls
     ...
 )
 ```
 
 **How It Works:**
-1. `max_llm_concurrent` controls LLM pool and ThreadPoolExecutor
-2. `max_parallel_jobs` controls evaluation slot semaphore
+1. `max_concurrent_llm` controls LLM pool and ThreadPoolExecutor
+2. `max_concurrent_evals` controls evaluation slot semaphore
 3. After LLM completes, job waits for eval slot before submitting to scheduler
 4. This creates natural backlog when LLM > eval capacity
 
 ### Verification
 
-Test with `max_llm_concurrent=12`, `max_eval_parallel=4`:
+Test with `max_concurrent_llm=12`, `max_concurrent_evals=4`:
 - **LLM peak: 12/12** (100% utilization)
 - **Successfully exceeded evaluation limit** (12 > 4)
 
@@ -202,5 +202,5 @@ Successfully exceeded evaluation parallelism with LLM calls!
 
 ## Files Modified
 
-- `shinka/core/runner.py` - Added `max_llm_concurrent` config, eval slot semaphore, in-flight tracking
+- `shinka/core/runner.py` - Added `max_concurrent_llm` config, eval slot semaphore, in-flight tracking
 - `docs/llm-pool-parallelism-investigation.md` - This investigation document
