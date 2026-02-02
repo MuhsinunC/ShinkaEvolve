@@ -281,6 +281,16 @@ class EvolutionRunner:
                 "previously completed generations."
             )
             logger.info("=" * 80)
+
+            # Recover any orphaned results (scorer completed but not in database)
+            # This can happen if process crashed after scorer finished but before
+            # _process_completed_job added the program to the database
+            orphaned_recovered = self._recover_orphaned_results()
+            if orphaned_recovered > 0:
+                logger.info(f"Recovered {orphaned_recovered} orphaned results from previous session")
+                # Update completed generations count after recovery
+                self._update_completed_generations()
+
             self._update_best_solution()
             # Restore meta memory state when resuming
             self._restore_meta_memory()
@@ -322,9 +332,22 @@ class EvolutionRunner:
         def graceful_shutdown(signum, frame):
             logger.info("")
             logger.info("=" * 60)
-            logger.info("INTERRUPT RECEIVED - Saving state before exit...")
+            logger.info("INTERRUPT RECEIVED - Processing completed jobs before exit...")
             logger.info("=" * 60)
             try:
+                # CRITICAL: Process any completed jobs before saving
+                # Without this, jobs where scorer finished but _process_completed_job
+                # hasn't run yet would be lost (metrics.json exists but not in database)
+                completed_jobs = self._check_completed_jobs()
+                if completed_jobs:
+                    logger.info(f"Processing {len(completed_jobs)} completed jobs before exit...")
+                    for job in completed_jobs:
+                        try:
+                            self._process_completed_job(job)
+                            logger.info(f"  Saved job for generation {job.generation}")
+                        except Exception as e:
+                            logger.error(f"  Failed to save job {job.generation}: {e}")
+
                 # Save all state to disk
                 self._save_meta_memory()  # Also saves LLM selection state
                 self.db.save()
@@ -948,6 +971,102 @@ class EvolutionRunner:
                     )
                 except Exception as e:
                     logger.error(f"Failed to recover ghost generation {gen_idx}: {e}")
+
+        return recovered
+
+    def _recover_orphaned_results(self) -> int:
+        """
+        Recover 'orphaned results' - generations where scorer completed (metrics.json exists)
+        but process crashed before _process_completed_job added the program to the database.
+
+        This complements _recover_ghost_generations which handles missing metrics.json.
+
+        Returns:
+            Number of orphaned results recovered
+        """
+        recovered = 0
+        running_gens = {job.generation for job in self.running_jobs}
+
+        for gen_idx in range(1, self.next_generation_to_submit):  # Skip gen 0 (handled separately)
+            if gen_idx in running_gens:
+                continue  # Already being processed
+
+            gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{gen_idx}"
+            main_file = gen_dir / f"main.{self.lang_ext}"
+            results_dir = gen_dir / "results"
+            metrics_file = results_dir / "metrics.json"
+
+            # Only process if metrics.json exists (scorer completed)
+            if not metrics_file.exists():
+                continue  # Ghost recovery handles this case
+
+            # Check if this generation is already in the database
+            with self._db_lock:
+                self.db.cursor.execute(
+                    "SELECT COUNT(*) FROM programs WHERE generation = ?",
+                    (gen_idx,)
+                )
+                count = self.db.cursor.fetchone()[0]
+
+            if count > 0:
+                continue  # Already in database
+
+            # This is an orphaned result - scorer finished but not in database
+            logger.warning(
+                f"Recovering orphaned result for gen {gen_idx}: "
+                f"metrics.json exists but not in database"
+            )
+
+            try:
+                # Try to recover parent_id from LLM response files
+                parent_id = None
+                code_diff = None
+                for attempt in range(1, 6):  # Check up to 5 attempts
+                    llm_response_file = gen_dir / f"llm_response_attempt_{attempt}.json"
+                    if llm_response_file.exists():
+                        try:
+                            with open(llm_response_file, 'r') as f:
+                                llm_data = json.load(f)
+                                parent_id = llm_data.get("parent_id")
+                                if parent_id:
+                                    logger.info(f"Recovered parent_id {parent_id} for orphaned gen {gen_idx}")
+                                    break
+                        except Exception as e:
+                            logger.debug(f"Could not read LLM response file: {e}")
+
+                # Read the code diff if available
+                diff_file = gen_dir / "edit.diff"
+                if diff_file.exists():
+                    try:
+                        code_diff = diff_file.read_text(encoding="utf-8")
+                    except Exception:
+                        pass
+
+                # Create a synthetic RunningJob and process it
+                running_job = RunningJob(
+                    job_id=f"recovered_orphan_{gen_idx}",
+                    exec_fname=str(main_file),
+                    results_dir=str(results_dir),
+                    start_time=time.time(),
+                    generation=gen_idx,
+                    parent_id=parent_id,
+                    archive_insp_ids=[],
+                    top_k_insp_ids=[],
+                    code_diff=code_diff,
+                    meta_patch_data={"recovered_orphan": True},
+                    code_embedding=None,
+                    embed_cost=0.0,
+                    novelty_cost=0.0,
+                )
+
+                # Process immediately (don't add to running_jobs, process directly)
+                self._process_completed_job(running_job)
+                recovered += 1
+
+                logger.info(f"Recovered orphaned result for generation {gen_idx}")
+
+            except Exception as e:
+                logger.error(f"Failed to recover orphaned result for gen {gen_idx}: {e}")
 
         return recovered
 
