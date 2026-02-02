@@ -1528,7 +1528,6 @@ class EvolutionRunner:
             # Extract cycle count from program metrics
             cycles = None
             if best_program.public_metrics:
-                import json
                 try:
                     metrics = json.loads(best_program.public_metrics) if isinstance(best_program.public_metrics, str) else best_program.public_metrics
                     cycles = metrics.get('cycles')
