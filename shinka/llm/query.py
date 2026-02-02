@@ -191,7 +191,7 @@ def query(
     model_name: str,
     msg: str,
     system_msg: str,
-    msg_history: List = [],
+    msg_history: Optional[List] = None,
     output_model: Optional[BaseModel] = None,
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
@@ -232,7 +232,7 @@ def _query_impl(
     model_name: str,
     msg: str,
     system_msg: str,
-    msg_history: List = [],
+    msg_history: Optional[List] = None,
     output_model: Optional[BaseModel] = None,
     model_posteriors: Optional[Dict[str, float]] = None,
     **kwargs,
@@ -242,6 +242,9 @@ def _query_impl(
     This function is called through the LLMPool's submit() method,
     which ensures concurrency control via semaphore.
     """
+    if msg_history is None:
+        msg_history = []
+
     client, model_name = get_client_llm(
         model_name, structured_output=output_model is not None
     )

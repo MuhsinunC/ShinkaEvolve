@@ -264,10 +264,17 @@ class EvolutionRunner:
         self.best_program_id: Optional[str] = None
         self.next_generation_to_submit = 0
 
-        # Threading lock for database operations and shared state
+        # Threading locks for database operations and shared state
+        # LOCK HIERARCHY (acquire in this order to prevent deadlocks):
+        #   1. _generation_lock - Protects next_generation_to_submit
+        #   2. _jobs_lock - Protects running_jobs list
+        #   3. _in_flight_llm_lock - Protects _in_flight_llm_jobs counter
+        #   4. _db_lock - Protects database operations
+        # Note: Never acquire a higher-numbered lock while holding a lower-numbered one.
         self._db_lock = threading.Lock()
         self._generation_lock = threading.Lock()
-        self._jobs_lock = threading.Lock()  # Protects running_jobs list
+        self._jobs_lock = threading.Lock()
+        # NoveltyJudge methods must be called with _db_lock held
 
         # Shutdown flag - signal handler sets this, main thread checks it
         self._shutdown_requested = threading.Event()
@@ -1080,19 +1087,30 @@ class EvolutionRunner:
         with self._jobs_lock:
             running_gens = {job.generation for job in self.running_jobs}
 
+        # Scan ALL gen_* directories, not just up to next_generation_to_submit
+        # This catches ghosts from previous sessions with higher generation numbers
+        results_path = Path(self.results_dir)
+        gen_dirs = list(results_path.glob(f"{FOLDER_PREFIX}_*"))
+
         # Debug: log scanning range
         if self.verbose:
             logger.debug(
-                f"Ghost recovery: scanning gens 0-{self.next_generation_to_submit-1}, "
+                f"Ghost recovery: scanning {len(gen_dirs)} gen_* directories, "
                 f"running: {sorted(running_gens)[:10]}..."
             )
 
         # Scan for generations with main.py but no metrics.json
-        for gen_idx in range(self.next_generation_to_submit):
+        for gen_dir in gen_dirs:
+            try:
+                gen_idx = int(gen_dir.name.split("_")[1])
+            except (IndexError, ValueError):
+                continue  # Invalid directory name
+
+            if gen_idx == 0:
+                continue  # Skip gen 0 (handled separately)
             if gen_idx in running_gens:
                 continue  # Already in queue
 
-            gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{gen_idx}"
             main_file = gen_dir / f"main.{self.lang_ext}"
             results_dir = gen_dir / "results"
             metrics_file = results_dir / "metrics.json"
@@ -1147,34 +1165,38 @@ class EvolutionRunner:
                         logger.debug(f"Skipping ghost gen {gen_idx}: no eval slots available")
                         continue
 
-                    # Submit the scorer job
-                    job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
+                    try:
+                        # Submit the scorer job
+                        job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
 
-                    # Add to running jobs with recovered metadata where possible
-                    running_job = RunningJob(
-                        job_id=job_id,
-                        exec_fname=str(main_file),
-                        results_dir=str(results_dir),
-                        start_time=time.time(),
-                        generation=gen_idx,
-                        parent_id=parent_id,  # Recovered from LLM response if available
-                        archive_insp_ids=[],
-                        top_k_insp_ids=[],
-                        code_diff=None,
-                        meta_patch_data={"recovered_ghost": True},
-                        code_embedding=None,
-                        embed_cost=0.0,
-                        novelty_cost=0.0,
-                    )
-                    with self._jobs_lock:
-                        self.running_jobs.append(running_job)
-                        queue_size = len(self.running_jobs)
-                    recovered += 1
+                        # Add to running jobs with recovered metadata where possible
+                        running_job = RunningJob(
+                            job_id=job_id,
+                            exec_fname=str(main_file),
+                            results_dir=str(results_dir),
+                            start_time=time.time(),
+                            generation=gen_idx,
+                            parent_id=parent_id,  # Recovered from LLM response if available
+                            archive_insp_ids=[],
+                            top_k_insp_ids=[],
+                            code_diff=None,
+                            meta_patch_data={"recovered_ghost": True},
+                            code_embedding=None,
+                            embed_cost=0.0,
+                            novelty_cost=0.0,
+                        )
+                        with self._jobs_lock:
+                            self.running_jobs.append(running_job)
+                            queue_size = len(self.running_jobs)
+                        recovered += 1
 
-                    logger.info(
-                        f"Resubmitted scorer for ghost generation {gen_idx}, "
-                        f"queue size: {queue_size}"
-                    )
+                        logger.info(
+                            f"Resubmitted scorer for ghost generation {gen_idx}, "
+                            f"queue size: {queue_size}"
+                        )
+                    except Exception:
+                        self._eval_slot_semaphore.release()  # Release on failure to prevent leak
+                        raise
                 except Exception as e:
                     logger.error(f"Failed to recover ghost generation {gen_idx}: {e}")
 

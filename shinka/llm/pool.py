@@ -130,15 +130,21 @@ class LLMPool:
     def reconfigure(self, max_concurrent: int) -> None:
         """Reconfigure the pool with a new max_concurrent value.
 
-        Note: This recreates the semaphore. Existing in-flight requests
-        are not affected, but new requests will use the new limit.
+        WARNING: This is a "soft" reconfigure that does NOT drain existing requests.
+        - Existing in-flight requests continue holding permits on the old semaphore
+        - New requests get permits from the new semaphore
+        - During transition, total concurrent requests may temporarily exceed max_concurrent
+
+        For a hard reconfigure that respects the new limit immediately, the caller
+        should ensure no requests are in-flight before calling this method.
         """
         with self._lock:
             old_max = self.max_concurrent
             self.max_concurrent = max_concurrent
             self._semaphore = threading.Semaphore(max_concurrent)
-            logger.info(
-                f"LLMPool reconfigured: max_concurrent {old_max} -> {max_concurrent}"
+            logger.warning(
+                f"LLMPool reconfigured: max_concurrent {old_max} -> {max_concurrent}. "
+                f"In-flight requests may temporarily exceed new limit."
             )
 
     @classmethod
