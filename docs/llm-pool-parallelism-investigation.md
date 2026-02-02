@@ -145,26 +145,47 @@ The apparent "gap" (e.g., 5/20 in user's observation) likely occurs when:
 
 ## Phase 4: Solution
 
-### Changes Made
+### Initial Finding
 
-**No code changes needed.** The system is working as designed.
+**No bug in LLM pool.** The system was working as designed. Low parallelism was due to evaluation backpressure.
 
-### Recommendations for Higher Throughput
+### Enhancement Implemented: LLM/Evaluation Separation
 
-If higher parallelism is desired in production:
+To allow saturating API rate limits while controlling evaluation compute, we implemented separate limits:
 
-1. **Reduce evaluation timeout** (currently 3 min) - faster evaluations free up slots sooner
-2. **Increase `max_parallel_jobs`** beyond desired concurrent LLM calls - accounts for evaluation queue overhead
-3. **Use faster LLM models** - Haiku instead of Sonnet reduces LLM call duration
-4. **Reduce extended thinking budget** - Less thinking = faster responses
+**New Config Field:**
+```python
+class EvolutionConfig:
+    max_parallel_jobs: int = 2      # Max concurrent EVALUATION jobs
+    max_llm_concurrent: int = None  # Max concurrent LLM API calls (defaults to max_parallel_jobs)
+```
+
+**Usage Example:**
+```python
+evo_config = EvolutionConfig(
+    max_parallel_jobs=60,      # Limit evaluations to 60 concurrent
+    max_llm_concurrent=800,    # Allow up to 800 concurrent LLM calls
+    ...
+)
+```
+
+**How It Works:**
+1. `max_llm_concurrent` controls LLM pool and ThreadPoolExecutor
+2. `max_parallel_jobs` controls evaluation slot semaphore
+3. After LLM completes, job waits for eval slot before submitting to scheduler
+4. This creates natural backlog when LLM > eval capacity
 
 ### Verification
 
-Three diagnostic tests confirmed:
-- Test 2: Peak 5/5 (100%)
-- Test 3: Peak 8/8 (100%)
+Test with `max_llm_concurrent=12`, `max_eval_parallel=4`:
+- **LLM peak: 12/12** (100% utilization)
+- **Successfully exceeded evaluation limit** (12 > 4)
 
-The LLM pool correctly reaches maximum parallelism when there is sufficient work.
+```
+*** LLM/EVAL SEPARATION WORKING ***
+LLM peak (12) > eval limit (4)
+Successfully exceeded evaluation parallelism with LLM calls!
+```
 
 ---
 
@@ -172,14 +193,14 @@ The LLM pool correctly reaches maximum parallelism when there is sufficient work
 
 | Question | Answer |
 |----------|--------|
-| Is there a bug? | **No** |
-| Does pool reach max parallel? | **Yes** (verified 5/5 and 8/8) |
-| Why low observed parallelism? | Not enough concurrent work OR evaluation backpressure |
-| Fix needed? | **No** - working as designed |
+| Is there a bug? | **No** - pool works correctly |
+| Does pool reach max parallel? | **Yes** (verified 5/5, 8/8, 12/12) |
+| Why low observed parallelism? | Evaluation backpressure OR not enough work |
+| Enhancement implemented? | **Yes** - separate LLM/eval limits |
 
 ---
 
 ## Files Modified
 
-- `shinkaevolve_harness/test_parallelism.py` - Diagnostic test script (created)
+- `shinka/core/runner.py` - Added `max_llm_concurrent` config, eval slot semaphore, in-flight tracking
 - `docs/llm-pool-parallelism-investigation.md` - This investigation document
