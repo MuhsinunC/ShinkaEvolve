@@ -69,30 +69,6 @@ class EvolutionConfig:
     novelty_llm_models: Optional[List[str]] = None
     novelty_llm_kwargs: dict = field(default_factory=lambda: {})
     use_text_feedback: bool = False
-    # Deprecated aliases (for backward compatibility)
-    max_parallel_jobs: Optional[int] = None  # DEPRECATED: use max_concurrent_evals
-    max_llm_concurrent: Optional[int] = None  # DEPRECATED: use max_concurrent_llm
-
-    def __post_init__(self):
-        # Handle deprecated aliases
-        if self.max_parallel_jobs is not None:
-            import warnings
-            warnings.warn(
-                "max_parallel_jobs is deprecated, use max_concurrent_evals instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if self.max_concurrent_evals == 2:  # Default wasn't changed
-                self.max_concurrent_evals = self.max_parallel_jobs
-        if self.max_llm_concurrent is not None:
-            import warnings
-            warnings.warn(
-                "max_llm_concurrent is deprecated, use max_concurrent_llm instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            if self.max_concurrent_llm is None:  # Default wasn't changed
-                self.max_concurrent_llm = self.max_llm_concurrent
 
 
 @dataclass
