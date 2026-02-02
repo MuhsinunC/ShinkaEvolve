@@ -47,7 +47,8 @@ class EvolutionConfig:
     patch_types: List[str] = field(default_factory=lambda: ["diff"])
     patch_type_probs: List[float] = field(default_factory=lambda: [1.0])
     num_generations: int = 10
-    max_parallel_jobs: int = 2
+    max_parallel_jobs: int = 2  # Max concurrent evaluation jobs
+    max_llm_concurrent: Optional[int] = None  # Max concurrent LLM API calls (defaults to max_parallel_jobs)
     max_patch_resamples: int = 3
     max_patch_attempts: int = 5
     job_type: str = "local"
@@ -107,8 +108,9 @@ class EvolutionRunner:
         self.verbose = verbose
 
         # Initialize centralized LLM pool FIRST - before any LLM clients
-        # This ensures all LLM calls are throttled by max_parallel_jobs
-        self.llm_pool = configure_pool(max_concurrent=evo_config.max_parallel_jobs)
+        # Use max_llm_concurrent if set, otherwise fall back to max_parallel_jobs
+        llm_concurrent = evo_config.max_llm_concurrent or evo_config.max_parallel_jobs
+        self.llm_pool = configure_pool(max_concurrent=llm_concurrent)
 
         print_gradient_logo((255, 0, 0), (255, 255, 255))
         if evo_config.results_dir is None:
@@ -269,8 +271,16 @@ class EvolutionRunner:
         # Shutdown flag - signal handler sets this, main thread checks it
         self._shutdown_requested = threading.Event()
 
-        # Thread pool for parallel LLM calls
-        self._llm_executor = ThreadPoolExecutor(max_workers=evo_config.max_parallel_jobs)
+        # Thread pool for parallel LLM calls - use max_llm_concurrent if set
+        llm_workers = evo_config.max_llm_concurrent or evo_config.max_parallel_jobs
+        self._llm_executor = ThreadPoolExecutor(max_workers=llm_workers)
+        self._max_llm_concurrent = llm_workers  # Store for later reference
+
+        # Evaluation slot semaphore - limits concurrent evaluations to max_parallel_jobs
+        # This allows LLM calls to exceed evaluation capacity, building a backlog
+        self._eval_slot_semaphore = threading.Semaphore(evo_config.max_parallel_jobs)
+        self._in_flight_llm_jobs = 0  # Track LLM jobs in progress (for logging)
+        self._in_flight_llm_lock = threading.Lock()
 
         if resuming_run:
             self.completed_generations = self.db.last_iteration + 1
@@ -368,8 +378,8 @@ class EvolutionRunner:
         max_jobs = self.evo_config.max_parallel_jobs
         target_gens = self.evo_config.num_generations
         logger.info(
-            f"Starting evolution with {max_jobs} parallel jobs, "
-            f"target: {target_gens} generations"
+            f"Starting evolution with max_llm_concurrent={self._max_llm_concurrent}, "
+            f"max_eval_parallel={max_jobs}, target: {target_gens} generations"
         )
 
         # First, run generation 0 sequentially to populate the database
@@ -439,12 +449,13 @@ class EvolutionRunner:
                     logger.info("All generations completed, exiting...")
                     break
 
-                # Submit new jobs to fill the queue (parallel submission)
-                with self._jobs_lock:
-                    running_count = len(self.running_jobs)
-                available_slots = max_jobs - running_count
+                # Submit new jobs to fill the LLM queue (parallel submission)
+                # Use max_llm_concurrent for LLM jobs, NOT max_parallel_jobs (which limits evals)
+                with self._in_flight_llm_lock:
+                    in_flight = self._in_flight_llm_jobs
+                available_llm_slots = self._max_llm_concurrent - in_flight
                 jobs_to_submit = min(
-                    available_slots,
+                    available_llm_slots,
                     target_gens - self.next_generation_to_submit
                 )
 
@@ -774,6 +785,19 @@ class EvolutionRunner:
 
     def _submit_new_job(self):
         """Submit a new job to the queue (thread-safe)."""
+        # Track in-flight LLM job
+        with self._in_flight_llm_lock:
+            self._in_flight_llm_jobs += 1
+
+        try:
+            self._submit_new_job_impl()
+        finally:
+            # LLM phase complete - decrement counter
+            with self._in_flight_llm_lock:
+                self._in_flight_llm_jobs -= 1
+
+    def _submit_new_job_impl(self):
+        """Actual job submission logic (wrapped by _submit_new_job for tracking)."""
         # Thread-safe generation counter increment
         with self._generation_lock:
             current_gen = self.next_generation_to_submit
@@ -902,6 +926,10 @@ class EvolutionRunner:
             meta_patch_data["novelty_checks_performed"] = novelty_checks_performed
             meta_patch_data["novelty_cost"] = novelty_cost
             meta_patch_data["novelty_explanation"] = novelty_explanation
+
+        # Wait for evaluation slot (allows LLM calls to exceed eval capacity)
+        # This blocks until an eval slot is available, creating backpressure
+        self._eval_slot_semaphore.acquire()
 
         # Submit the job asynchronously
         job_id = self.scheduler.submit_async(exec_fname, results_dir)
@@ -1111,6 +1139,12 @@ class EvolutionRunner:
                                         break
                             except Exception as e:
                                 logger.debug(f"Could not read LLM response file: {e}")
+
+                    # Acquire eval slot before submitting (non-blocking check)
+                    # For ghost recovery, we use try_acquire to avoid blocking the recovery loop
+                    if not self._eval_slot_semaphore.acquire(blocking=False):
+                        logger.debug(f"Skipping ghost gen {gen_idx}: no eval slots available")
+                        continue
 
                     # Submit the scorer job
                     job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
@@ -1326,6 +1360,9 @@ class EvolutionRunner:
 
     def _process_completed_job(self, job: RunningJob):
         """Process a completed job and add results to database."""
+        # Release evaluation slot - allows another LLM-completed job to submit
+        self._eval_slot_semaphore.release()
+
         end_time = time.time()
         rtime = end_time - job.start_time
 
