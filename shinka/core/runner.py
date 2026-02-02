@@ -388,6 +388,10 @@ class EvolutionRunner:
             last_checkpoint_time = time.time()
             checkpoint_interval = 60  # seconds - save state every minute
 
+            # Ghost recovery rate limiting (avoid expensive directory scans every 0.5s)
+            last_ghost_check_time = 0.0
+            ghost_check_interval = 30  # seconds - check for ghost generations every 30s
+
             # Main loop: monitor jobs and submit new ones
             while True:
                 with self._jobs_lock:
@@ -421,7 +425,8 @@ class EvolutionRunner:
                 # Periodic checkpoint - protects against SIGKILL and hard crashes
                 if time.time() - last_checkpoint_time > checkpoint_interval:
                     try:
-                        self.db.save()
+                        with self._db_lock:  # Thread-safe database access
+                            self.db.save()
                         self._save_meta_memory()
                         last_checkpoint_time = time.time()
                         if self.verbose:
@@ -459,10 +464,12 @@ class EvolutionRunner:
                             self._perform_graceful_shutdown()
                             return
 
-                        # Recover any ghost generations (called frequently to minimize lost work)
-                        ghost_recovered = self._recover_ghost_generations()
-                        if ghost_recovered > 0:
-                            logger.info(f"Recovered {ghost_recovered} ghost generations")
+                        # Recover any ghost generations (rate-limited to avoid expensive scans)
+                        if time.time() - last_ghost_check_time > ghost_check_interval:
+                            ghost_recovered = self._recover_ghost_generations()
+                            if ghost_recovered > 0:
+                                logger.info(f"Recovered {ghost_recovered} ghost generations")
+                            last_ghost_check_time = time.time()
 
                         # Check for completed evaluation jobs
                         completed_jobs = self._check_completed_jobs()
@@ -485,10 +492,11 @@ class EvolutionRunner:
                                 future.result()
                             except Exception as e:
                                 logger.error(f"Error in parallel job submission: {e}")
-                                # Immediately try to recover ghost generations after errors
+                                # Force ghost check after errors (bypass rate limit)
                                 recovered = self._recover_ghost_generations()
                                 if recovered > 0:
                                     logger.info(f"Recovered {recovered} ghost generations after error")
+                                last_ghost_check_time = time.time()  # Reset timer after forced check
                 else:
                     # No jobs to submit, just wait a bit
                     time.sleep(0.5)
@@ -512,6 +520,16 @@ class EvolutionRunner:
             f"peak concurrent: {pool_stats['peak_concurrent']}/{pool_stats['max_concurrent']}, "
             f"total cost: ${pool_stats['total_cost']:.4f}"
         )
+
+        # Clean up thread pool on normal exit
+        try:
+            # Python 3.9+ supports cancel_futures, earlier versions don't
+            try:
+                self._llm_executor.shutdown(wait=True, cancel_futures=False)
+            except TypeError:
+                self._llm_executor.shutdown(wait=True)
+        except Exception as e:
+            logger.warning(f"Thread pool shutdown error: {e}")
 
         logger.info("=" * 80)
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -926,7 +944,11 @@ class EvolutionRunner:
         # Step 1: Shut down thread pool to prevent new submissions
         try:
             logger.info("Shutting down thread pool...")
-            self._llm_executor.shutdown(wait=False, cancel_futures=True)
+            # Python 3.9+ supports cancel_futures, earlier versions don't
+            try:
+                self._llm_executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                self._llm_executor.shutdown(wait=False)
         except Exception as e:
             logger.warning(f"Thread pool shutdown error (non-fatal): {e}")
 
@@ -944,22 +966,44 @@ class EvolutionRunner:
         except Exception as e:
             logger.error(f"Error processing completed jobs: {e}")
 
-        # Step 3: Save state with retries (CRITICAL)
+        # Step 3: Save state with retries (CRITICAL) - separate retries for each component
         max_retries = 3
+
+        # Save meta memory first
+        meta_saved = False
         for retry in range(max_retries):
             try:
                 self._save_meta_memory()  # Also saves LLM selection state
-                self.db.save()
-                logger.info("State saved successfully. Safe to exit.")
-                logger.info(f"Resume with: --resume {self.results_dir}")
+                meta_saved = True
                 break
             except Exception as e:
                 if retry < max_retries - 1:
-                    logger.warning(f"State save failed (attempt {retry + 1}/{max_retries}): {e}")
+                    logger.warning(f"Meta memory save failed (attempt {retry + 1}/{max_retries}): {e}")
                     time.sleep(0.5)
                 else:
-                    logger.critical(f"FAILED TO SAVE STATE AFTER {max_retries} RETRIES: {e}")
-                    logger.critical("Data may be lost! Check database integrity on resume.")
+                    logger.error(f"FAILED TO SAVE META MEMORY AFTER {max_retries} RETRIES: {e}")
+
+        # Save database separately
+        db_saved = False
+        for retry in range(max_retries):
+            try:
+                with self._db_lock:
+                    self.db.save()
+                db_saved = True
+                break
+            except Exception as e:
+                if retry < max_retries - 1:
+                    logger.warning(f"Database save failed (attempt {retry + 1}/{max_retries}): {e}")
+                    time.sleep(0.5)
+                else:
+                    logger.error(f"FAILED TO SAVE DATABASE AFTER {max_retries} RETRIES: {e}")
+
+        if meta_saved and db_saved:
+            logger.info("State saved successfully. Safe to exit.")
+            logger.info(f"Resume with: --resume {self.results_dir}")
+        else:
+            logger.critical("PARTIAL STATE SAVE - some data may be lost!")
+            logger.critical("Check database integrity on resume.")
 
         logger.info("=" * 60)
 
@@ -1261,7 +1305,6 @@ class EvolutionRunner:
     def _check_completed_jobs(self) -> List[RunningJob]:
         """Check for completed jobs and return them (thread-safe)."""
         completed = []
-        still_running = []
 
         with self._jobs_lock:
             jobs_snapshot = list(self.running_jobs)
@@ -1273,9 +1316,6 @@ class EvolutionRunner:
                 if self.verbose:
                     logger.info(f"Job {job.job_id} completed!")
                 completed.append(job)
-            else:
-                # Job still running
-                still_running.append(job)
 
         with self._jobs_lock:
             # Only remove completed jobs from the list - new jobs may have been added
