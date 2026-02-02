@@ -993,8 +993,9 @@ class EvolutionRunner:
 
             gen_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{gen_idx}"
             main_file = gen_dir / f"main.{self.lang_ext}"
-            results_dir = gen_dir / "results"
-            metrics_file = results_dir / "metrics.json"
+            results_dir_path = gen_dir / "results"
+            metrics_file = results_dir_path / "metrics.json"
+            correct_file = results_dir_path / "correct.json"
 
             # Only process if metrics.json exists (scorer completed)
             if not metrics_file.exists():
@@ -1018,6 +1019,25 @@ class EvolutionRunner:
             )
 
             try:
+                # Read metrics directly from files (don't rely on scheduler)
+                metrics_val = {}
+                correct_val = False
+                text_feedback = ""
+
+                try:
+                    with open(metrics_file, 'r') as f:
+                        metrics_val = json.load(f)
+                    logger.info(f"Read metrics for gen {gen_idx}: score={metrics_val.get('combined_score')}")
+                except Exception as e:
+                    logger.warning(f"Could not read metrics.json for gen {gen_idx}: {e}")
+
+                try:
+                    with open(correct_file, 'r') as f:
+                        correct_data = json.load(f)
+                        correct_val = correct_data.get("correct", False)
+                except Exception as e:
+                    logger.warning(f"Could not read correct.json for gen {gen_idx}: {e}")
+
                 # Try to recover parent_id from LLM response files
                 parent_id = None
                 code_diff = None
@@ -1042,28 +1062,47 @@ class EvolutionRunner:
                     except Exception:
                         pass
 
-                # Create a synthetic RunningJob and process it
-                running_job = RunningJob(
-                    job_id=f"recovered_orphan_{gen_idx}",
-                    exec_fname=str(main_file),
-                    results_dir=str(results_dir),
-                    start_time=time.time(),
-                    generation=gen_idx,
+                # Read the code
+                evaluated_code = ""
+                try:
+                    evaluated_code = main_file.read_text(encoding="utf-8")
+                except Exception as e:
+                    logger.warning(f"Could not read main.py for gen {gen_idx}: {e}")
+
+                # Extract metrics
+                combined_score = metrics_val.get("combined_score", 0.0)
+                public_metrics = metrics_val.get("public", {})
+                private_metrics = metrics_val.get("private", {})
+                text_feedback = metrics_val.get("text_feedback", "")
+
+                # Create program and add to database directly
+                db_program = Program(
+                    id=str(uuid.uuid4()),
+                    code=evaluated_code,
+                    language=self.evo_config.language,
                     parent_id=parent_id,
-                    archive_insp_ids=[],
-                    top_k_insp_ids=[],
+                    generation=gen_idx,
+                    archive_inspiration_ids=[],
+                    top_k_inspiration_ids=[],
                     code_diff=code_diff,
-                    meta_patch_data={"recovered_orphan": True},
-                    code_embedding=None,
-                    embed_cost=0.0,
-                    novelty_cost=0.0,
+                    embedding=None,
+                    correct=correct_val,
+                    combined_score=combined_score,
+                    public_metrics=public_metrics,
+                    private_metrics=private_metrics,
+                    text_feedback=text_feedback,
+                    metadata={"recovered_orphan": True},
                 )
 
-                # Process immediately (don't add to running_jobs, process directly)
-                self._process_completed_job(running_job)
-                recovered += 1
+                with self._db_lock:
+                    self.db.add(db_program, verbose=True)
+                    self.db.save()
 
-                logger.info(f"Recovered orphaned result for generation {gen_idx}")
+                recovered += 1
+                logger.info(
+                    f"Recovered orphaned result for generation {gen_idx}: "
+                    f"score={combined_score}, correct={correct_val}"
+                )
 
             except Exception as e:
                 logger.error(f"Failed to recover orphaned result for gen {gen_idx}: {e}")
