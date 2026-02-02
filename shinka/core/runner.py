@@ -107,10 +107,11 @@ class EvolutionRunner:
         self.db_config = db_config
         self.verbose = verbose
 
+        # Compute effective LLM concurrency once (used for pool, executor, and slot calculation)
+        self._max_concurrent_llm = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
+
         # Initialize centralized LLM pool FIRST - before any LLM clients
-        # Use max_concurrent_llm if set, otherwise fall back to max_concurrent_evals
-        llm_concurrent = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
-        self.llm_pool = configure_pool(max_concurrent=llm_concurrent)
+        self.llm_pool = configure_pool(max_concurrent=self._max_concurrent_llm)
 
         print_gradient_logo((255, 0, 0), (255, 255, 255))
         if evo_config.results_dir is None:
@@ -271,10 +272,8 @@ class EvolutionRunner:
         # Shutdown flag - signal handler sets this, main thread checks it
         self._shutdown_requested = threading.Event()
 
-        # Thread pool for parallel LLM calls - use max_concurrent_llm if set
-        llm_workers = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
-        self._llm_executor = ThreadPoolExecutor(max_workers=llm_workers)
-        self._max_concurrent_llm = llm_workers  # Store for later reference
+        # Thread pool for parallel LLM calls (uses _max_concurrent_llm computed earlier)
+        self._llm_executor = ThreadPoolExecutor(max_workers=self._max_concurrent_llm)
 
         # Evaluation slot semaphore - limits concurrent evaluations to max_concurrent_evals
         # This allows LLM calls to exceed evaluation capacity, building a backlog
@@ -452,12 +451,11 @@ class EvolutionRunner:
                 # Submit new jobs to fill the LLM queue (parallel submission)
                 # Use max_concurrent_llm for LLM jobs, NOT max_concurrent_evals (which limits evals)
                 with self._in_flight_llm_lock:
-                    in_flight = self._in_flight_llm_jobs
-                available_llm_slots = self._max_concurrent_llm - in_flight
-                jobs_to_submit = min(
-                    available_llm_slots,
-                    target_gens - self.next_generation_to_submit
-                )
+                    available_llm_slots = self._max_concurrent_llm - self._in_flight_llm_jobs
+                    jobs_to_submit = min(
+                        available_llm_slots,
+                        target_gens - self.next_generation_to_submit
+                    )
 
                 if jobs_to_submit > 0:
                     # Submit multiple jobs in parallel using thread pool
@@ -930,29 +928,32 @@ class EvolutionRunner:
         # Wait for evaluation slot (allows LLM calls to exceed eval capacity)
         # This blocks until an eval slot is available, creating backpressure
         self._eval_slot_semaphore.acquire()
+        try:
+            # Submit the job asynchronously
+            job_id = self.scheduler.submit_async(exec_fname, results_dir)
 
-        # Submit the job asynchronously
-        job_id = self.scheduler.submit_async(exec_fname, results_dir)
-
-        # Add to running jobs queue (thread-safe)
-        running_job = RunningJob(
-            job_id=job_id,
-            exec_fname=exec_fname,
-            results_dir=results_dir,
-            start_time=time.time(),
-            generation=current_gen,
-            parent_id=parent_id,
-            archive_insp_ids=archive_insp_ids,
-            top_k_insp_ids=top_k_insp_ids,
-            code_diff=code_diff,
-            meta_patch_data=meta_patch_data,
-            code_embedding=code_embedding,
-            embed_cost=embed_cost,
-            novelty_cost=novelty_cost,
-        )
-        with self._jobs_lock:
-            self.running_jobs.append(running_job)
-            queue_size = len(self.running_jobs)
+            # Add to running jobs queue (thread-safe)
+            running_job = RunningJob(
+                job_id=job_id,
+                exec_fname=exec_fname,
+                results_dir=results_dir,
+                start_time=time.time(),
+                generation=current_gen,
+                parent_id=parent_id,
+                archive_insp_ids=archive_insp_ids,
+                top_k_insp_ids=top_k_insp_ids,
+                code_diff=code_diff,
+                meta_patch_data=meta_patch_data,
+                code_embedding=code_embedding,
+                embed_cost=embed_cost,
+                novelty_cost=novelty_cost,
+            )
+            with self._jobs_lock:
+                self.running_jobs.append(running_job)
+                queue_size = len(self.running_jobs)
+        except Exception:
+            self._eval_slot_semaphore.release()  # Release on failure to prevent leak
+            raise
 
         if self.verbose:
             logger.info(
