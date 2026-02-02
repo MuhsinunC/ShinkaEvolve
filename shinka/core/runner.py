@@ -279,6 +279,19 @@ class EvolutionRunner:
             logger.info("=" * 80)
             logger.info("RESUMING PREVIOUS EVOLUTION RUN")
             logger.info("=" * 80)
+
+            # Verify database integrity before proceeding
+            try:
+                self.db.cursor.execute("PRAGMA integrity_check")
+                integrity_result = self.db.cursor.fetchone()
+                if integrity_result[0] != "ok":
+                    logger.error(f"DATABASE INTEGRITY CHECK FAILED: {integrity_result}")
+                    logger.error("The database may be corrupted. Consider restoring from backup.")
+                else:
+                    logger.info("Database integrity check: OK")
+            except Exception as e:
+                logger.warning(f"Could not verify database integrity: {e}")
+
             logger.info(
                 f"Resuming evolution from: {self.results_dir}\n"
                 f"Found {self.completed_generations} "
@@ -371,6 +384,10 @@ class EvolutionRunner:
         if self.completed_generations < target_gens:
             logger.info("Starting parallel execution for remaining generations...")
 
+            # Periodic checkpoint tracking (CRITICAL: protects against SIGKILL)
+            last_checkpoint_time = time.time()
+            checkpoint_interval = 60  # seconds - save state every minute
+
             # Main loop: monitor jobs and submit new ones
             while True:
                 with self._jobs_lock:
@@ -400,6 +417,17 @@ class EvolutionRunner:
                             f"Total generations: {self.completed_generations}/{target_gens} "
                             f"({session_progress} this session)"
                         )
+
+                # Periodic checkpoint - protects against SIGKILL and hard crashes
+                if time.time() - last_checkpoint_time > checkpoint_interval:
+                    try:
+                        self.db.save()
+                        self._save_meta_memory()
+                        last_checkpoint_time = time.time()
+                        if self.verbose:
+                            logger.debug("Periodic checkpoint saved")
+                    except Exception as e:
+                        logger.warning(f"Periodic checkpoint failed: {e}")
 
                 # Check if we've completed all generations
                 if self.completed_generations >= target_gens:
@@ -894,10 +922,16 @@ class EvolutionRunner:
         MUST be called from main thread (not signal handler) to avoid deadlocks.
         """
         logger.info("Performing graceful shutdown...")
+
+        # Step 1: Shut down thread pool to prevent new submissions
         try:
-            # Process any completed jobs before saving
-            # Without this, jobs where scorer finished but _process_completed_job
-            # hasn't run yet would be lost (metrics.json exists but not in database)
+            logger.info("Shutting down thread pool...")
+            self._llm_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as e:
+            logger.warning(f"Thread pool shutdown error (non-fatal): {e}")
+
+        # Step 2: Process any completed jobs before saving
+        try:
             completed_jobs = self._check_completed_jobs()
             if completed_jobs:
                 logger.info(f"Processing {len(completed_jobs)} completed jobs before exit...")
@@ -907,14 +941,26 @@ class EvolutionRunner:
                         logger.info(f"  Saved job for generation {job.generation}")
                     except Exception as e:
                         logger.error(f"  Failed to save job {job.generation}: {e}")
-
-            # Save all state to disk
-            self._save_meta_memory()  # Also saves LLM selection state
-            self.db.save()
-            logger.info("State saved successfully. Safe to exit.")
-            logger.info(f"Resume with: --resume {self.results_dir}")
         except Exception as e:
-            logger.error(f"Error saving state: {e}")
+            logger.error(f"Error processing completed jobs: {e}")
+
+        # Step 3: Save state with retries (CRITICAL)
+        max_retries = 3
+        for retry in range(max_retries):
+            try:
+                self._save_meta_memory()  # Also saves LLM selection state
+                self.db.save()
+                logger.info("State saved successfully. Safe to exit.")
+                logger.info(f"Resume with: --resume {self.results_dir}")
+                break
+            except Exception as e:
+                if retry < max_retries - 1:
+                    logger.warning(f"State save failed (attempt {retry + 1}/{max_retries}): {e}")
+                    time.sleep(0.5)
+                else:
+                    logger.critical(f"FAILED TO SAVE STATE AFTER {max_retries} RETRIES: {e}")
+                    logger.critical("Data may be lost! Check database integrity on resume.")
+
         logger.info("=" * 60)
 
     def _count_ghost_generations(self) -> int:
@@ -983,8 +1029,19 @@ class EvolutionRunner:
                 # Check if there's already a scorer running (job_log files exist and are recent)
                 job_log = results_dir / "job_log.out"
                 if job_log.exists():
-                    # Log file exists, scorer may have run but failed - skip
-                    continue
+                    # Check if job log is recent (within 5 minutes) - scorer might still be running
+                    try:
+                        log_age = time.time() - job_log.stat().st_mtime
+                        if log_age < 300:  # Less than 5 minutes old
+                            logger.debug(
+                                f"Skipping ghost gen {gen_idx}: job_log is recent "
+                                f"({log_age:.0f}s old), scorer may still be running"
+                            )
+                            continue
+                        # Log file exists but is old - scorer failed or was killed
+                        logger.debug(f"Ghost gen {gen_idx}: job_log is stale ({log_age:.0f}s old)")
+                    except OSError:
+                        pass  # Stat failed, proceed with recovery
 
                 # This is a ghost generation - resubmit scorer
                 logger.warning(
@@ -1084,15 +1141,15 @@ class EvolutionRunner:
                 continue  # Ghost recovery handles this case
 
             # Check if this generation is already in the database
+            # NOTE: We check again inside the lock before inserting to prevent race conditions
             with self._db_lock:
                 self.db.cursor.execute(
                     "SELECT COUNT(*) FROM programs WHERE generation = ?",
                     (gen_idx,)
                 )
                 count = self.db.cursor.fetchone()[0]
-
-            if count > 0:
-                continue  # Already in database
+                if count > 0:
+                    continue  # Already in database
 
             # This is an orphaned result - scorer finished but not in database
             logger.warning(
@@ -1177,6 +1234,16 @@ class EvolutionRunner:
                 )
 
                 with self._db_lock:
+                    # Double-check inside lock to prevent race condition
+                    # Another thread may have added this generation since our first check
+                    self.db.cursor.execute(
+                        "SELECT COUNT(*) FROM programs WHERE generation = ?",
+                        (gen_idx,)
+                    )
+                    if self.db.cursor.fetchone()[0] > 0:
+                        logger.debug(f"Gen {gen_idx} already added by another thread, skipping")
+                        continue  # Another thread beat us to it
+
                     self.db.add(db_program, verbose=True)
                     self.db.save()
 
