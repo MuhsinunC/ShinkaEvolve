@@ -7,8 +7,10 @@ problem where hundreds of concurrent retries make congestion worse.
 
 States:
     CLOSED    - Normal operation. Failures are counted.
-    OPEN      - Endpoint is overwhelmed. Callers sleep until recovery_timeout.
-    HALF_OPEN - After cooldown, allow a few probe requests through.
+    OPEN      - Endpoint is overwhelmed. Callers wait on a Condition until
+                recovery_timeout expires.
+    HALF_OPEN - After cooldown, allow a limited number of probe requests
+                through. Other callers wait until probes confirm recovery.
 
 Thread-safe — designed to be shared across all callers hitting the same endpoint.
 
@@ -27,7 +29,8 @@ Usage:
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from collections import deque
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,11 @@ class CircuitBreakerStats:
 
 class CircuitBreaker:
     """Thread-safe circuit breaker with exponential recovery timeout.
+
+    Uses a Condition variable to avoid the thundering herd problem: when
+    the circuit opens, waiting threads block on Condition.wait(timeout)
+    rather than time.sleep(). Only a limited number of probe requests
+    pass through during HALF_OPEN state.
 
     Args:
         name: Human-readable identifier for logging.
@@ -74,11 +82,13 @@ class CircuitBreaker:
         self.half_open_success_threshold = half_open_successes
 
         self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
         self._state = CLOSED
         self._consecutive_failures = 0
         self._opened_at: float = 0.0
         self._current_recovery_timeout = recovery_timeout
         self._half_open_successes = 0
+        self._half_open_permits = 0  # Probe slots remaining in HALF_OPEN
 
         # Stats
         self._total_failures = 0
@@ -108,32 +118,57 @@ class CircuitBreaker:
             )
 
     def before_request(self) -> None:
-        """Called before making an API request. Blocks if circuit is open."""
-        with self._lock:
-            if self._state == CLOSED:
-                return
-            wait_time = self._compute_wait_and_transition()
+        """Called before making an API request. Blocks if circuit is open.
 
-        # Sleep outside of lock so other threads can also check state
-        if wait_time > 0:
-            logger.warning(
-                "Circuit breaker [%s] OPEN — sleeping %.1fs before request",
-                self.name, wait_time,
-            )
-            time.sleep(wait_time)
-            with self._lock:
-                # Transition to half-open after sleeping
-                if self._state == OPEN:
+        Uses Condition.wait() to avoid thundering herd:
+        - OPEN: threads wait until recovery_timeout expires, then one
+          transitions to HALF_OPEN and proceeds as the first probe.
+        - HALF_OPEN: only a limited number of probe requests pass through;
+          remaining threads wait for the circuit to close or re-open.
+        - CLOSED: returns immediately.
+        """
+        with self._condition:
+            while True:
+                if self._state == CLOSED:
+                    return
+
+                if self._state == HALF_OPEN:
+                    if self._half_open_permits > 0:
+                        self._half_open_permits -= 1
+                        return  # Allowed through as a probe
+                    # No probe permits left — wait for state change
+                    self._condition.wait()
+                    continue
+
+                # OPEN state — check if cooldown has expired
+                elapsed = time.monotonic() - self._opened_at
+                if elapsed >= self._current_recovery_timeout:
+                    # Cooldown expired — this thread transitions to HALF_OPEN
                     self._state = HALF_OPEN
                     self._half_open_successes = 0
+                    # Allow (threshold - 1) more probes; this thread is the first
+                    self._half_open_permits = self.half_open_success_threshold - 1
                     logger.info(
                         "Circuit breaker [%s] -> HALF_OPEN after cooldown",
                         self.name,
                     )
+                    return
+
+                # Cooldown not yet expired — wait with timeout
+                wait_time = self._current_recovery_timeout - elapsed
+                self._total_sleeps += 1
+                self._total_sleep_seconds += wait_time
+                logger.warning(
+                    "Circuit breaker [%s] OPEN — waiting %.1fs",
+                    self.name, wait_time,
+                )
+                # Releases lock, blocks until notified or timeout
+                self._condition.wait(timeout=wait_time)
+                # Loop re-checks state after waking
 
     def record_success(self) -> None:
         """Record a successful API call."""
-        with self._lock:
+        with self._condition:
             if self._state == HALF_OPEN:
                 self._half_open_successes += 1
                 if self._half_open_successes >= self.half_open_success_threshold:
@@ -144,12 +179,14 @@ class CircuitBreaker:
                         "Circuit breaker [%s] -> CLOSED (recovered)",
                         self.name,
                     )
+                    # Wake all waiting threads — circuit is closed
+                    self._condition.notify_all()
             else:
                 self._consecutive_failures = 0
 
     def record_failure(self) -> None:
         """Record a failed API call."""
-        with self._lock:
+        with self._condition:
             self._consecutive_failures += 1
             self._total_failures += 1
 
@@ -166,6 +203,8 @@ class CircuitBreaker:
                     "Circuit breaker [%s] -> OPEN (probe failed, cooldown %.0fs)",
                     self.name, self._current_recovery_timeout,
                 )
+                # Wake waiters so they re-evaluate with the new OPEN timeout
+                self._condition.notify_all()
             elif (
                 self._state == CLOSED
                 and self._consecutive_failures >= self.failure_threshold
@@ -179,40 +218,19 @@ class CircuitBreaker:
                     self._consecutive_failures,
                     self._current_recovery_timeout,
                 )
+                # Wake waiters so they see the new OPEN state
+                self._condition.notify_all()
 
     def reset(self) -> None:
         """Manually reset the circuit breaker to CLOSED state."""
-        with self._lock:
+        with self._condition:
             self._state = CLOSED
             self._consecutive_failures = 0
             self._current_recovery_timeout = self.base_recovery_timeout
             self._half_open_successes = 0
+            self._half_open_permits = 0
             logger.info("Circuit breaker [%s] manually reset to CLOSED", self.name)
-
-    def _compute_wait_and_transition(self) -> float:
-        """Compute wait time and possibly transition state. Must hold lock."""
-        if self._state == OPEN:
-            elapsed = time.monotonic() - self._opened_at
-            if elapsed >= self._current_recovery_timeout:
-                # Cooldown expired, transition to half-open immediately
-                self._state = HALF_OPEN
-                self._half_open_successes = 0
-                logger.info(
-                    "Circuit breaker [%s] -> HALF_OPEN after %.0fs cooldown",
-                    self.name, elapsed,
-                )
-                return 0.0
-            else:
-                wait_time = self._current_recovery_timeout - elapsed
-                self._total_sleeps += 1
-                self._total_sleep_seconds += wait_time
-                return wait_time
-
-        if self._state == HALF_OPEN:
-            # Already half-open, let the request through
-            return 0.0
-
-        return 0.0
+            self._condition.notify_all()
 
 
 class EvalCircuitBreaker:
@@ -249,7 +267,7 @@ class EvalCircuitBreaker:
         self.ramp_up_interval = ramp_up_interval
 
         self._lock = threading.Lock()
-        self._outcomes: list[bool] = []  # True = success, False = failure
+        self._outcomes: deque[bool] = deque(maxlen=window_size)
         self._effective_concurrent = max_concurrent
         self._last_ramp_up = 0.0
         self._last_reduction_time = 0.0
@@ -264,8 +282,6 @@ class EvalCircuitBreaker:
         """Record an eval job outcome and possibly adjust concurrency."""
         with self._lock:
             self._outcomes.append(success)
-            if len(self._outcomes) > self.window_size:
-                self._outcomes = self._outcomes[-self.window_size:]
 
             if len(self._outcomes) < 3:
                 return  # Not enough data

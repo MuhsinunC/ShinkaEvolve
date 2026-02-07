@@ -133,8 +133,8 @@ def _is_client_error(exc):
         anthropic.APITimeoutError,
     ),
     max_value=MAX_BACKOFF_SECONDS,  # Cap backoff at 5 minutes
+    max_time=600,  # Give up after 10 minutes total so pool circuit breaker can trip
     jitter=backoff.full_jitter,  # Add jitter to prevent thundering herd
-    # No max_tries = infinite retries until success or manual stop
     on_backoff=backoff_handler,
     giveup=_is_client_error,  # Stop retrying on 4xx client errors
 )

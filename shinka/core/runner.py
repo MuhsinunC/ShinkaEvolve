@@ -944,15 +944,21 @@ class EvolutionRunner:
 
         # Adaptive backpressure: if the eval circuit breaker has reduced concurrency,
         # wait until enough eval slots have freed up to respect the lower limit.
-        effective = self._eval_breaker.effective_concurrent
-        if effective < self.evo_config.max_concurrent_evals:
-            # Count running eval jobs and wait if we're at the reduced limit
-            while True:
-                with self._jobs_lock:
-                    running_count = len(self.running_jobs)
-                if running_count < effective:
-                    break
-                time.sleep(0.5)
+        # Re-reads effective_concurrent each iteration so breaker changes take effect.
+        # The semaphore below is the actual concurrency gate; this loop is a soft
+        # throttle that cooperates with the breaker (TOCTOU between check and
+        # acquire is harmless — worst case, the semaphore blocks briefly).
+        while True:
+            if self._shutdown_requested.is_set():
+                return
+            effective = self._eval_breaker.effective_concurrent
+            if effective >= self.evo_config.max_concurrent_evals:
+                break  # Breaker at full capacity, no throttling needed
+            with self._jobs_lock:
+                running_count = len(self.running_jobs)
+            if running_count < effective:
+                break
+            time.sleep(0.5)
 
         # Wait for evaluation slot (allows LLM calls to exceed eval capacity)
         # This blocks until an eval slot is available, creating backpressure

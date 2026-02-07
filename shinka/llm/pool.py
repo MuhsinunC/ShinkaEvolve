@@ -16,7 +16,7 @@ the API is returning errors and pauses requests to avoid thundering herd.
 """
 import threading
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Callable, Any
 
 from shinka.llm.circuit_breaker import CircuitBreaker
