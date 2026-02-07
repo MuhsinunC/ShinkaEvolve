@@ -20,6 +20,11 @@ from .circuit_breaker import (
     OPEN,
     HALF_OPEN,
 )
+from .cubic import (
+    CubicConcurrency,
+    CubicStats,
+    is_rate_limit_error,
+)
 
 __all__ = [
     "LLMClient",
@@ -41,4 +46,8 @@ __all__ = [
     "CLOSED",
     "OPEN",
     "HALF_OPEN",
+    # CUBIC Concurrency
+    "CubicConcurrency",
+    "CubicStats",
+    "is_rate_limit_error",
 ]

@@ -49,7 +49,7 @@ class EvolutionConfig:
     patch_type_probs: List[float] = field(default_factory=lambda: [1.0])
     num_generations: int = 10
     max_concurrent_evals: int = 2  # Max concurrent evaluation jobs
-    max_concurrent_llm: Optional[int] = None  # Max concurrent LLM API calls (defaults to max_concurrent_evals)
+    max_concurrent_llm: Optional[int] = None  # Max concurrent LLM API calls (None=max_concurrent_evals, 0=auto, N=ceiling)
     max_patch_resamples: int = 3
     max_patch_attempts: int = 5
     job_type: str = "local"
@@ -108,8 +108,15 @@ class EvolutionRunner:
         self.db_config = db_config
         self.verbose = verbose
 
-        # Compute effective LLM concurrency once (used for pool, executor, and slot calculation)
-        self._max_concurrent_llm = evo_config.max_concurrent_llm or evo_config.max_concurrent_evals
+        # Compute effective LLM concurrency:
+        #   None -> fall back to max_concurrent_evals (backward compat, fixed semaphore)
+        #   0    -> auto mode (CUBIC adaptive, no ceiling)
+        #   1    -> sequential (fixed semaphore)
+        #   N>1  -> CUBIC adaptive with N as ceiling
+        if evo_config.max_concurrent_llm is not None:
+            self._max_concurrent_llm = evo_config.max_concurrent_llm
+        else:
+            self._max_concurrent_llm = evo_config.max_concurrent_evals
 
         # Initialize centralized LLM pool FIRST - before any LLM clients
         self.llm_pool = configure_pool(max_concurrent=self._max_concurrent_llm)
@@ -280,8 +287,11 @@ class EvolutionRunner:
         # Shutdown flag - signal handler sets this, main thread checks it
         self._shutdown_requested = threading.Event()
 
-        # Thread pool for parallel LLM calls (uses _max_concurrent_llm computed earlier)
-        self._llm_executor = ThreadPoolExecutor(max_workers=self._max_concurrent_llm)
+        # Thread pool for parallel LLM calls.
+        # For auto mode (0), use 500 threads — CUBIC controls actual concurrency.
+        # For explicit ceiling, match the ceiling.
+        _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else 500
+        self._llm_executor = ThreadPoolExecutor(max_workers=_executor_workers)
 
         # Evaluation slot semaphore - limits concurrent evaluations to max_concurrent_evals
         # This allows LLM calls to exceed evaluation capacity, building a backlog
