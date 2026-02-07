@@ -8,9 +8,6 @@ import json
 logger = logging.getLogger(__name__)
 
 
-# Infinite retries - user must manually stop if they want to abort
-# Exponential backoff caps at 5 minutes between retries
-MAX_BACKOFF_SECONDS = 300  # 5 minutes max wait between retries
 
 # JSON schema for structured diff output - guarantees Claude follows the format
 DIFF_OUTPUT_SCHEMA = {
@@ -132,8 +129,8 @@ def _is_client_error(exc):
         anthropic.RateLimitError,
         anthropic.APITimeoutError,
     ),
-    max_value=MAX_BACKOFF_SECONDS,  # Cap backoff at 5 minutes
-    max_time=600,  # Give up after 10 minutes total so pool circuit breaker can trip
+    max_tries=5,  # 5 retries, then let pool circuit breaker handle sustained failures
+    max_value=60,  # Cap individual backoff at 1 minute
     jitter=backoff.full_jitter,  # Add jitter to prevent thundering herd
     on_backoff=backoff_handler,
     giveup=_is_client_error,  # Stop retrying on 4xx client errors

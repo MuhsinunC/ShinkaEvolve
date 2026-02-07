@@ -12,6 +12,14 @@ from .pool import (
     configure_pool,
     reset_pool,
 )
+from .circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerStats,
+    EvalCircuitBreaker,
+    CLOSED,
+    OPEN,
+    HALF_OPEN,
+)
 
 __all__ = [
     "LLMClient",
@@ -26,4 +34,11 @@ __all__ = [
     "get_llm_pool",
     "configure_pool",
     "reset_pool",
+    # Circuit Breaker
+    "CircuitBreaker",
+    "CircuitBreakerStats",
+    "EvalCircuitBreaker",
+    "CLOSED",
+    "OPEN",
+    "HALF_OPEN",
 ]
