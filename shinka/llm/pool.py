@@ -162,10 +162,11 @@ class LLMPool:
             self._breaker.record_success()
             return result
         except Exception as e:
-            # Only notify circuit breaker for non-rate-limit errors
-            # (server errors, timeouts, connection failures)
-            # Rate limit errors are handled by CUBIC in _submit_adaptive()
-            if not is_rate_limit_error(e):
+            # In adaptive mode, CUBIC handles 429s — don't double-count in circuit breaker.
+            # In non-adaptive mode, all errors go to circuit breaker (no CUBIC to handle 429s).
+            if self._adaptive and is_rate_limit_error(e):
+                pass  # CUBIC handles this in _submit_adaptive()
+            else:
                 self._breaker.record_failure()
             raise
         finally:
@@ -201,9 +202,12 @@ class LLMPool:
         """Reconfigure the pool with a new max_concurrent value.
 
         WARNING: This is a "soft" reconfigure that does NOT drain existing requests.
+        In-flight requests continue on the old controller. Threads blocked in
+        the old CUBIC acquire() are released so they can reacquire on the new one.
         """
         with self._lock:
             old_max = self.max_concurrent
+            old_cubic = self._cubic
             self.max_concurrent = max_concurrent
             self._adaptive = max_concurrent != 1
 
@@ -214,6 +218,10 @@ class LLMPool:
             else:
                 self._cubic = None
                 self._semaphore = threading.Semaphore(1)
+
+            # Release any threads blocked in the old CUBIC's acquire()
+            if old_cubic is not None:
+                old_cubic.reset()
 
             logger.warning(
                 f"LLMPool reconfigured: max_concurrent {old_max} -> {max_concurrent}. "

@@ -140,11 +140,14 @@ class CubicConcurrency:
             return
 
         # CUBIC: W(t) = C * (t - K)^3 + W_max
+        # Note: called with self._lock held via release() -> Condition context
         t = time.monotonic() - self._epoch_start
         K = self._compute_K()
         w_cubic = self._C * ((t - K) ** 3) + self._w_max
 
-        self._window = max(1.0, min(w_cubic, float(self._ceiling)))
+        # Ensure window never decreases on success (cubic curve is concave early)
+        target = max(1.0, min(w_cubic, float(self._ceiling)))
+        self._window = max(self._window, target)
 
     def _compute_K(self) -> float:
         """Compute K: time to reach W_max after a decrease."""

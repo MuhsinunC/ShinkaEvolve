@@ -478,7 +478,9 @@ class EvolutionRunner:
                 # Submit new jobs to fill the LLM queue (parallel submission)
                 # Use max_concurrent_llm for LLM jobs, NOT max_concurrent_evals (which limits evals)
                 with self._in_flight_llm_lock:
-                    available_llm_slots = self._max_concurrent_llm - self._in_flight_llm_jobs
+                    # Auto mode (0): CUBIC controls concurrency, use executor size as cap
+                    effective_cap = self._max_concurrent_llm if self._max_concurrent_llm > 0 else 500
+                    available_llm_slots = effective_cap - self._in_flight_llm_jobs
                     jobs_to_submit = min(
                         available_llm_slots,
                         target_gens - self.next_generation_to_submit
