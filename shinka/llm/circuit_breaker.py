@@ -159,13 +159,14 @@ class CircuitBreaker:
                 # Cooldown not yet expired — wait with timeout
                 wait_time = self._current_recovery_timeout - elapsed
                 self._total_sleeps += 1
-                self._total_sleep_seconds += wait_time
                 logger.warning(
                     "Circuit breaker [%s] OPEN — waiting %.1fs",
                     self.name, wait_time,
                 )
                 # Releases lock, blocks until notified or timeout
+                wait_start = time.monotonic()
                 self._condition.wait(timeout=wait_time)
+                self._total_sleep_seconds += time.monotonic() - wait_start
                 # Loop re-checks state after waking
 
     def record_success(self) -> None:
