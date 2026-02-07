@@ -590,7 +590,12 @@ def _find_all_patch_blocks(patch_text: str):
 
     # Try git-style first (<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE)
     for block in GIT_STYLE_PATTERN.finditer(patch_text):
-        blocks.append((block.group(1), block.group(2), block.start()))
+        search_text = block.group(1)
+        replace_text = block.group(2)
+        # Strip trailing ======= separator that some models (e.g. Hermes)
+        # insert before >>>>>>> REPLACE
+        replace_text = re.sub(r"\n\s*={7}\s*$", "", replace_text)
+        blocks.append((search_text, replace_text, block.start()))
         logger.debug(f"Found git-style block at position {block.start()}")
 
     # Try XML-style (<SEARCH>...</SEARCH><REPLACE>...</REPLACE>)

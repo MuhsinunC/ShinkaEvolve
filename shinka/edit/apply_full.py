@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from typing import Optional, Union
 from .apply_diff import write_git_diff, _mutable_ranges, EVOLVE_START, EVOLVE_END
@@ -45,8 +46,15 @@ def apply_full_patch(
         or isinstance(extracted_code, dict)
         or extracted_code == "none"
     ):
-        error_message = "Could not extract code from patch string"
-        return original, 0, None, error_message, None, None
+        # Fallback: open-source models like Hermes may put code directly
+        # inside <CODE> tags without markdown backticks.
+        code_match = re.search(r"<CODE>\s*(.*?)\s*</CODE>", patch_str, re.DOTALL)
+        if code_match:
+            extracted_code = code_match.group(1).strip()
+            logger.info("Extracted code from <CODE> tags (no markdown backticks)")
+        else:
+            error_message = "Could not extract code from patch string"
+            return original, 0, None, error_message, None, None
 
     patch_code = str(extracted_code)
 
