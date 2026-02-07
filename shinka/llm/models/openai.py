@@ -1,3 +1,6 @@
+import os
+import re
+
 import backoff
 import openai
 from .pricing import OPENAI_MODELS
@@ -5,6 +8,19 @@ from .result import QueryResult
 import logging
 
 logger = logging.getLogger(__name__)
+
+# Hermes-style thinking: prepend a system prompt that activates <think> tags,
+# then strip them from the response so ShinkaEvolve sees clean code output.
+HERMES_THINKING_ENABLED = os.getenv("HERMES_THINKING", "false").lower() == "true"
+HERMES_THINKING_PROMPT = (
+    "You are a deep thinking AI, you may use extremely long chains of thought "
+    "to deeply consider the problem and deliberate with yourself via systematic "
+    "reasoning processes to help come to a correct solution prior to answering. "
+    "You should enclose your thoughts and internal monologue inside <think> "
+    "</think> tags, and then provide your solution or response to the problem."
+)
+
+_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL)
 
 
 def backoff_handler(details):
@@ -43,8 +59,14 @@ def query_openai(
     compatibility with OpenAI-compatible endpoints (vLLM, Nous, etc.).
     """
     new_msg_history = msg_history + [{"role": "user", "content": msg}]
+
+    # Optionally prepend Hermes thinking instructions to the system message
+    effective_system_msg = system_msg
+    if HERMES_THINKING_ENABLED:
+        effective_system_msg = HERMES_THINKING_PROMPT + "\n\n" + system_msg
+
     messages = [
-        {"role": "system", "content": system_msg},
+        {"role": "system", "content": effective_system_msg},
         *new_msg_history,
     ]
 
@@ -59,6 +81,9 @@ def query_openai(
             **kwargs,
         )
         content = response.choices[0].message.content or ""
+        # Strip Hermes <think>...</think> blocks so ShinkaEvolve sees clean output
+        if HERMES_THINKING_ENABLED:
+            content = _THINK_TAG_RE.sub("", content).strip()
         new_msg_history.append({"role": "assistant", "content": content})
     else:
         # response_model is handled by the instructor library, which wraps
