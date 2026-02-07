@@ -1,7 +1,8 @@
-"""Global LLM request pool with concurrency control.
+"""Global LLM request pool with concurrency control and circuit breaker.
 
-This module provides a centralized pool for ALL LLM calls with throttling
-and queue management via semaphore-based concurrency control.
+This module provides a centralized pool for ALL LLM calls with throttling,
+queue management via semaphore-based concurrency control, and a circuit
+breaker that pauses all requests when the API is overwhelmed.
 
 All LLM requests flow through this pool regardless of source:
 - Evolution jobs (main LLM)
@@ -10,12 +11,15 @@ All LLM requests flow through this pool regardless of source:
 - batch_query() calls
 
 This prevents rate limit issues by ensuring only max_concurrent API calls
-can be active at any time.
+can be active at any time. The circuit breaker additionally detects when
+the API is returning errors and pauses requests to avoid thundering herd.
 """
 import threading
 import logging
 from dataclasses import dataclass, field
 from typing import Optional, Callable, Any
+
+from shinka.llm.circuit_breaker import CircuitBreaker
 
 logger = logging.getLogger(__name__)
 
@@ -61,14 +65,21 @@ class LLMPool:
         self._semaphore = threading.Semaphore(max_concurrent)
         self._stats = LLMPoolStats()
         self._stats_lock = threading.Lock()
+        self._breaker = CircuitBreaker(
+            name="llm-pool",
+            failure_threshold=5,
+            recovery_timeout=30.0,
+            max_recovery_timeout=120.0,
+        )
         self._initialized = True
         logger.info(f"LLMPool initialized with max_concurrent={max_concurrent}")
 
     def submit(self, query_fn: Callable, *args, **kwargs) -> Any:
         """Submit an LLM request through the pool.
 
-        This method blocks until a slot is available in the semaphore,
-        ensuring we never exceed max_concurrent active API calls.
+        This method blocks if the circuit breaker is open (API overwhelmed),
+        then blocks until a semaphore slot is available, ensuring we never
+        exceed max_concurrent active API calls.
 
         Args:
             query_fn: The function to call (typically _query_impl)
@@ -78,6 +89,9 @@ class LLMPool:
         Returns:
             The result from query_fn
         """
+        # Circuit breaker check — blocks if API is overwhelmed
+        self._breaker.before_request()
+
         # Track active requests before acquiring semaphore
         with self._stats_lock:
             self._stats.total_requests += 1
@@ -87,7 +101,7 @@ class LLMPool:
             return self._execute(query_fn, *args, **kwargs)
 
     def _execute(self, query_fn: Callable, *args, **kwargs) -> Any:
-        """Execute the query and track stats."""
+        """Execute the query, track stats, and update circuit breaker."""
         # Track active count
         with self._stats_lock:
             self._stats.active_requests += 1
@@ -109,13 +123,18 @@ class LLMPool:
                 self._stats.total_cache_read_tokens += cache_read
                 self._stats.total_cache_write_tokens += cache_write
 
+            self._breaker.record_success()
             return result
+        except Exception:
+            self._breaker.record_failure()
+            raise
         finally:
             with self._stats_lock:
                 self._stats.active_requests -= 1
 
     def get_stats(self) -> dict:
-        """Get current pool statistics."""
+        """Get current pool statistics including circuit breaker state."""
+        breaker_stats = self._breaker.get_stats()
         with self._stats_lock:
             return {
                 "total_requests": self._stats.total_requests,
@@ -125,6 +144,9 @@ class LLMPool:
                 "max_concurrent": self.max_concurrent,
                 "total_cache_read_tokens": self._stats.total_cache_read_tokens,
                 "total_cache_write_tokens": self._stats.total_cache_write_tokens,
+                "circuit_breaker_state": breaker_stats.current_state,
+                "circuit_breaker_trips": breaker_stats.total_trips,
+                "circuit_breaker_total_sleep_seconds": breaker_stats.total_sleep_seconds,
             }
 
     def reconfigure(self, max_concurrent: int) -> None:

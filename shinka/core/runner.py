@@ -27,6 +27,7 @@ from shinka.llm import (
     AsymmetricUCB,
     configure_pool,
 )
+from shinka.llm.circuit_breaker import EvalCircuitBreaker
 from shinka.edit import (
     apply_diff_patch,
     apply_full_patch,
@@ -287,6 +288,15 @@ class EvolutionRunner:
         self._eval_slot_semaphore = threading.Semaphore(evo_config.max_concurrent_evals)
         self._in_flight_llm_jobs = 0  # Track LLM jobs in progress (for logging)
         self._in_flight_llm_lock = threading.Lock()
+
+        # Eval circuit breaker - adaptively reduces concurrency when eval jobs fail
+        self._eval_breaker = EvalCircuitBreaker(
+            max_concurrent=evo_config.max_concurrent_evals,
+            window_size=20,
+            failure_rate_threshold=0.5,
+            min_concurrent=max(1, evo_config.max_concurrent_evals // 4),
+            ramp_up_interval=60.0,
+        )
 
         if resuming_run:
             self.completed_generations = self.db.last_iteration + 1
@@ -932,6 +942,18 @@ class EvolutionRunner:
             meta_patch_data["novelty_cost"] = novelty_cost
             meta_patch_data["novelty_explanation"] = novelty_explanation
 
+        # Adaptive backpressure: if the eval circuit breaker has reduced concurrency,
+        # wait until enough eval slots have freed up to respect the lower limit.
+        effective = self._eval_breaker.effective_concurrent
+        if effective < self.evo_config.max_concurrent_evals:
+            # Count running eval jobs and wait if we're at the reduced limit
+            while True:
+                with self._jobs_lock:
+                    running_count = len(self.running_jobs)
+                if running_count < effective:
+                    break
+                time.sleep(0.5)
+
         # Wait for evaluation slot (allows LLM calls to exceed eval capacity)
         # This blocks until an eval slot is available, creating backpressure
         self._eval_slot_semaphore.acquire()
@@ -1423,6 +1445,11 @@ class EvolutionRunner:
         public_metrics = metrics_val.get("public", {})
         private_metrics = metrics_val.get("private", {})
         text_feedback = metrics_val.get("text_feedback", "")
+
+        # Track eval outcome for adaptive concurrency control.
+        # An eval "fails" if it returned no results (e.g. crash, timeout).
+        eval_success = results is not None and bool(metrics_val)
+        self._eval_breaker.record_outcome(eval_success)
 
         # Add the program to the database
         db_program = Program(
