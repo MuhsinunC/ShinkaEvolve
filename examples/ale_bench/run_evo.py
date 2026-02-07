@@ -87,7 +87,7 @@ Try diverse approaches to solve the problem. Think outside the box."""
         patch_types=["diff", "full", "cross"],
         patch_type_probs=[0.6, 0.3, 0.1],
         num_generations=num_generations,
-        max_parallel_jobs=1,
+        max_concurrent_evals=1,
         max_patch_resamples=3,
         max_patch_attempts=3,
         job_type="local",

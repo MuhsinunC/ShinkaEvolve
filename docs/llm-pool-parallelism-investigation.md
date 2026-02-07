@@ -50,7 +50,7 @@ runner._run_generation()
    - This creates batch-based parallelism, not continuous pipelining
 
 **Configuration (shinkaevolve_harness/config.py):**
-- `max_parallel_jobs=60`
+- `max_concurrent_evals=60` (formerly `max_parallel_jobs`)
 - Evaluation timeout: 3 minutes
 - Extended thinking: 32K tokens (~30-60s per LLM call)
 

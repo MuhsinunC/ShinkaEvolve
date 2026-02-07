@@ -24,7 +24,7 @@ Controls the core evolutionary algorithm parameters:
 evo_config:
   _target_: shinka.core.EvolutionConfig
   num_generations: 20              # Number of evolution generations
-  max_parallel_jobs: 1             # Maximum parallel evaluations
+  max_concurrent_evals: 1          # Maximum concurrent evaluations
   max_patch_attempts: 10           # Max attempts to generate valid patches
   
   # LLM Configuration
@@ -136,7 +136,8 @@ exp_name: "shinka_my_task"
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `num_generations` | int | 20 | Number of evolutionary generations |
-| `max_parallel_jobs` | int | 1 | Maximum concurrent evaluations |
+| `max_concurrent_evals` | int | 2 | Maximum concurrent evaluations |
+| `max_concurrent_llm` | Optional[int] | None | Maximum concurrent LLM API calls (None=same as evals, 0=auto) |
 | `max_patch_attempts` | int | 10 | Maximum attempts to generate valid patches |
 | `llm_models` | list | `["azure-gpt-4.1"]` | LLM models for mutations |
 | `patch_types` | list | `["diff", "full"]` | Types of code modifications |
@@ -254,7 +255,7 @@ defaults:
 # Override specific parameters
 evo_config:
   num_generations: 25
-  max_parallel_jobs: 2
+  max_concurrent_evals: 2
 
 db_config:
   archive_size: 30
@@ -279,7 +280,7 @@ shinka_launch \
     evolution=medium_budget \
     cluster=local \
     evo_config.num_generations=50 \
-    evo_config.max_parallel_jobs=4 \
+    evo_config.max_concurrent_evals=4 \
     db_config.num_islands=6 \
     variant_suffix="_custom_run"
 ```
@@ -347,7 +348,7 @@ defaults:
 
 evo_config:
   num_generations: 5
-  max_parallel_jobs: 1
+  max_concurrent_evals: 1
 
 db_config:
   num_islands: 1
@@ -366,7 +367,7 @@ defaults:
 
 evo_config:
   num_generations: 100
-  max_parallel_jobs: 8
+  max_concurrent_evals: 8
 
 db_config:
   num_islands: 8
@@ -387,7 +388,7 @@ defaults:
 # Standardized parameters for fair comparison
 evo_config:
   num_generations: 30
-  max_parallel_jobs: 2
+  max_concurrent_evals: 2
   llm_models: ["azure-gpt-4.1"]
 
 db_config:

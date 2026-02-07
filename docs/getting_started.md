@@ -175,7 +175,7 @@ db_config = DatabaseConfig(
 # Configure the evolution parameters
 evo_config = EvolutionConfig(
     num_generations=10,
-    max_parallel_jobs=1,
+    max_concurrent_evals=1,
     llm_models=["azure-gpt-4.1"],
     init_program_path="examples/circle_packing/initial.py",
     language="python",
@@ -472,7 +472,7 @@ python -c "import os; print(os.getenv('OPENAI_API_KEY'))"
 - Ensure the evaluation function returns expected data types
 
 **4. Memory Issues**
-- Reduce `max_parallel_jobs` for local execution
+- Reduce `max_concurrent_evals` for local execution
 - Increase memory allocation for cluster jobs
 - Monitor database size and archive settings
 
