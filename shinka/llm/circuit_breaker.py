@@ -136,8 +136,10 @@ class CircuitBreaker:
                     if self._half_open_permits > 0:
                         self._half_open_permits -= 1
                         return  # Allowed through as a probe
-                    # No probe permits left — wait for state change
-                    self._condition.wait()
+                    # No probe permits left — wait for state change.
+                    # Use a timeout so we don't block forever if probe
+                    # threads are lost (e.g. killed without recording).
+                    self._condition.wait(timeout=self._current_recovery_timeout)
                     continue
 
                 # OPEN state — check if cooldown has expired
