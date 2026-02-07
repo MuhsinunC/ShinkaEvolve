@@ -234,7 +234,7 @@ class MetaSummarizer:
                 include_text_feedback=self.use_text_feedback,
             )
             generation_ids.append(program.generation)
-            patch_names.append(program.metadata["patch_name"])
+            patch_names.append(program.metadata.get("patch_name", "unknown"))
             correct_programs.append(program.correct)
             user_msg = META_STEP1_USER_MSG.replace(
                 "{individual_program_msg}", individual_program_msg
