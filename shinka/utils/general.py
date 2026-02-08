@@ -38,9 +38,21 @@ def load_results(results_dir: str):
             try:
                 loaded_results["metrics"] = json.load(f)
             except json.JSONDecodeError:
-                file_path_str = str(metrics_file_path)
-                warning_msg = f"Could not decode JSON from {file_path_str}"
-                logger.warning(warning_msg)
+                # Corrupt JSON (likely from a crash during non-atomic write).
+                # Rename so ghost recovery treats this generation as unscored
+                # instead of silently accepting score=0.
+                corrupt_path = metrics_file_path.with_suffix(".json.corrupt")
+                try:
+                    metrics_file_path.rename(corrupt_path)
+                    logger.warning(
+                        "Corrupt metrics.json at %s renamed to %s for re-scoring",
+                        metrics_file_path, corrupt_path,
+                    )
+                except OSError:
+                    logger.warning(
+                        "Could not decode or rename corrupt JSON at %s",
+                        metrics_file_path,
+                    )
                 loaded_results["metrics"] = {}
     else:
         file_path_str = str(metrics_file_path)

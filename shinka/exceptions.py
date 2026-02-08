@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
@@ -33,7 +34,11 @@ _SCORER_FAILURE_FILE = "scorer_failure.json"
 
 
 def _write_scorer_failure(results_dir: str, error_type: str, error: str):
-    """Write scorer_failure.json marker.  Internal — use *scorer_failure_context*."""
+    """Write scorer_failure.json marker.  Internal — use *scorer_failure_context*.
+
+    Uses atomic write (write-to-temp-then-rename) to prevent corrupt
+    marker files if the process is killed mid-write.
+    """
     os.makedirs(results_dir, exist_ok=True)
     payload = {
         "error_type": error_type,
@@ -41,8 +46,17 @@ def _write_scorer_failure(results_dir: str, error_type: str, error: str):
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     path = os.path.join(results_dir, _SCORER_FAILURE_FILE)
-    with open(path, "w") as f:
-        json.dump(payload, f, indent=2)
+    fd, tmp_path = tempfile.mkstemp(dir=results_dir, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
     logger.error("Scorer failure saved to %s", path)
 
 

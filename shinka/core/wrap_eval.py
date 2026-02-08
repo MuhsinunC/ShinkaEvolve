@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import tempfile
 import time
 import numpy as np
 import pickle
@@ -32,24 +33,47 @@ def load_program(program_path: str) -> Any:
     return module
 
 
+def _atomic_json_write(path: str, data: Dict[str, Any], indent: int = 4) -> None:
+    """Write JSON atomically via write-to-temp-then-rename.
+
+    If the process is killed mid-write, only the temp file is corrupt —
+    the original ``path`` is either absent or contains the previous
+    valid content.  Ghost/orphan recovery depends on this guarantee.
+    """
+    dir_name = os.path.dirname(path)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=indent)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def save_json_results(
     results_dir: str,
     metrics: Dict[str, Any],
     correct: bool,
     error: Optional[str] = None,
 ) -> None:
-    """Saves metrics and correctness status to JSON files."""
+    """Saves metrics and correctness status to JSON files.
+
+    Uses atomic writes (write-to-temp-then-rename) to prevent corrupt
+    files if the process is killed mid-write.
+    """
     os.makedirs(results_dir, exist_ok=True)
 
     correct_payload = {"correct": correct, "error": error}
     correct_file = os.path.join(results_dir, "correct.json")
-    with open(correct_file, "w") as f:
-        json.dump(correct_payload, f, indent=4)
+    _atomic_json_write(correct_file, correct_payload)
     print(f"Correctness and error status saved to {correct_file}")
 
     metrics_file = os.path.join(results_dir, "metrics.json")
-    with open(metrics_file, "w") as f:
-        json.dump(metrics, f, indent=4)
+    _atomic_json_write(metrics_file, metrics)
     print(f"Metrics saved to {metrics_file}")
 
 

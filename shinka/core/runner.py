@@ -1324,6 +1324,20 @@ class EvolutionRunner:
                     with open(metrics_file, 'r') as f:
                         metrics_val = json.load(f)
                     logger.info(f"Read metrics for gen {gen_idx}: score={metrics_val.get('combined_score')}")
+                except json.JSONDecodeError as e:
+                    # Corrupt metrics.json (likely from a crash mid-write).
+                    # Rename it so ghost recovery can re-score this generation
+                    # instead of silently recording score=0.
+                    corrupt_path = metrics_file.with_suffix(".json.corrupt")
+                    try:
+                        metrics_file.rename(corrupt_path)
+                        logger.warning(
+                            f"Corrupt metrics.json for gen {gen_idx} "
+                            f"(renamed to .corrupt for ghost re-score): {e}"
+                        )
+                    except OSError:
+                        logger.warning(f"Could not rename corrupt metrics.json for gen {gen_idx}: {e}")
+                    continue  # Skip — ghost recovery will re-score
                 except Exception as e:
                     logger.warning(f"Could not read metrics.json for gen {gen_idx}: {e}")
 
