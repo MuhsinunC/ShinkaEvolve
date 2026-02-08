@@ -347,7 +347,7 @@ class ProgramDatabase:
         self.cursor.execute(
             "PRAGMA wal_autocheckpoint = 1000;"
         )  # Checkpoint every 1000 pages
-        self.cursor.execute("PRAGMA synchronous = NORMAL;")  # Safer, faster
+        self.cursor.execute("PRAGMA synchronous = FULL;")  # Survives power failure
         self.cursor.execute("PRAGMA cache_size = -64000;")  # 64MB cache
         self.cursor.execute("PRAGMA temp_store = MEMORY;")
         self.cursor.execute("PRAGMA foreign_keys = ON;")  # For data integrity

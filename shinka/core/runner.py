@@ -1385,6 +1385,23 @@ class EvolutionRunner:
                 private_metrics = metrics_val.get("private", {})
                 text_feedback = metrics_val.get("text_feedback", "")
 
+                # Recompute embedding for orphan-recovered generations so
+                # novelty search isn't degraded by missing embeddings.
+                orphan_embedding = None
+                if self.embedding is not None:
+                    try:
+                        orphan_embedding, _ = self.get_code_embedding(
+                            str(main_file)
+                        )
+                        logger.info(
+                            f"Computed embedding for orphaned gen {gen_idx}"
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Could not compute embedding for orphaned "
+                            f"gen {gen_idx}: {e}"
+                        )
+
                 # Create program and add to database directly
                 db_program = Program(
                     id=str(uuid.uuid4()),
@@ -1395,7 +1412,7 @@ class EvolutionRunner:
                     archive_inspiration_ids=[],
                     top_k_inspiration_ids=[],
                     code_diff=code_diff,
-                    embedding=None,
+                    embedding=orphan_embedding,
                     correct=correct_val,
                     combined_score=combined_score,
                     public_metrics=public_metrics,
@@ -1503,9 +1520,25 @@ class EvolutionRunner:
         code_embedding = job.code_embedding
         e_cost = job.embed_cost if job.embed_cost is not None else 0.0
         n_cost = job.novelty_cost if job.novelty_cost is not None else 0.0
+
+        # Recompute embedding for recovered jobs (ghost/orphan recovery sets
+        # code_embedding=None).  Without this, recovered generations permanently
+        # lack embeddings and degrade novelty search quality.
+        if not code_embedding and self.embedding is not None:
+            try:
+                code_embedding, e_cost = self.get_code_embedding(job.exec_fname)
+                logger.info(
+                    f"Recomputed embedding for recovered gen {job.generation} "
+                    f"(cost: {e_cost:.4f})"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not recompute embedding for gen {job.generation}: {e}"
+                )
+
         if self.verbose:
             logger.debug(
-                f"=> Using pre-computed embedding for job {job.job_id}, "
+                f"=> Using embedding for job {job.job_id}, "
                 f"embed cost: {e_cost:.4f}, novelty cost: {n_cost:.4f}"
             )
 
@@ -2107,11 +2140,20 @@ class EvolutionRunner:
         state_path = Path(self.results_dir) / "llm_selection_state.json"
         try:
             state = self.llm_selection.to_dict()
-            with state_path.open('w', encoding='utf-8') as f:
+            # Atomic write: temp file then rename to prevent corruption on crash
+            tmp_path = state_path.with_suffix(".json.tmp")
+            with tmp_path.open('w', encoding='utf-8') as f:
                 json.dump(state, f, indent=2)
+            tmp_path.replace(state_path)
             logger.debug(f"Saved LLM selection state to {state_path}")
         except Exception as e:
             logger.warning(f"Failed to save LLM selection state: {e}")
+            try:
+                tmp_path = state_path.with_suffix(".json.tmp")
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
 
     def _restore_llm_selection_state(self) -> None:
         """Restore the LLM selection bandit state from disk."""
