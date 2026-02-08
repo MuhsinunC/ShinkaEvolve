@@ -5,6 +5,8 @@ Provides async versions of patch application and validation.
 
 import asyncio
 import logging
+import os
+import tempfile
 from typing import Tuple, Optional
 from pathlib import Path
 from .apply_diff import apply_diff_patch
@@ -210,7 +212,11 @@ async def validate_code_async(
 
 
 async def write_file_async(file_path: str, content: str) -> bool:
-    """Async file writing.
+    """Async file writing with atomic write (write-to-temp-then-rename).
+
+    Uses write-then-rename to prevent corrupt code files if the process
+    is killed mid-write.  Ghost recovery depends on main.py being either
+    absent or valid — never half-written.
 
     Args:
         file_path: Path to write file
@@ -222,21 +228,28 @@ async def write_file_async(file_path: str, content: str) -> bool:
     try:
         # Ensure parent directory exists
         parent_dir = Path(file_path).parent
-        await asyncio.get_event_loop().run_in_executor(
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
             None, lambda: parent_dir.mkdir(parents=True, exist_ok=True)
         )
 
-        if aiofiles:
-            # Use aiofiles if available
-            async with aiofiles.open(file_path, "w") as f:
-                await f.write(content)
-        else:
-            # Fall back to sync I/O in thread pool
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None, lambda: Path(file_path).write_text(content)
+        # Write to temp file, then atomic rename
+        def _atomic_write():
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(parent_dir), suffix=".tmp"
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(content)
+                os.replace(tmp_path, file_path)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
 
+        await loop.run_in_executor(None, _atomic_write)
         return True
 
     except Exception as e:

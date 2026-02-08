@@ -1,7 +1,9 @@
 import json
+import os
 import shutil
 import sys
 import signal
+import tempfile
 import uuid
 import time
 import logging
@@ -706,8 +708,20 @@ class EvolutionRunner:
             initial_code, patch_name, patch_description, api_costs = (
                 self.generate_initial_program()
             )
-            with open(exec_fname, "w", encoding="utf-8") as f:
-                f.write(initial_code)
+            # Atomic write: temp file then rename to prevent corrupt code on crash
+            _fd, _tmp = tempfile.mkstemp(
+                dir=str(Path(exec_fname).parent), suffix=".tmp"
+            )
+            try:
+                with os.fdopen(_fd, "w", encoding="utf-8") as f:
+                    f.write(initial_code)
+                os.replace(_tmp, exec_fname)
+            except BaseException:
+                try:
+                    os.unlink(_tmp)
+                except OSError:
+                    pass
+                raise
 
             if self.verbose:
                 logger.info(f"Initial program generated and saved to {exec_fname}")
@@ -1856,18 +1870,28 @@ class EvolutionRunner:
             }
 
             # IMMEDIATE FILE PERSISTENCE: Write to file before evaluation
-            # This provides crash protection - the response is saved even if evaluation crashes
+            # This provides crash protection - the response is saved even if evaluation crashes.
+            # Contains parent_id needed for web UI lineage tree during recovery.
+            # Atomic write prevents corrupt JSON if process is killed mid-write.
             if early_persist_metadata.get("llm_response_archived"):
                 persist_dir = Path(self.results_dir) / f"{FOLDER_PREFIX}_{generation}"
                 persist_dir.mkdir(parents=True, exist_ok=True)
                 persist_path = persist_dir / f"llm_response_attempt_{patch_attempt + 1}.json"
                 try:
-                    with persist_path.open('w', encoding='utf-8') as f:
+                    tmp_path = persist_path.with_suffix(".json.tmp")
+                    with tmp_path.open('w', encoding='utf-8') as f:
                         json.dump(early_persist_metadata, f, indent=2)
+                    tmp_path.replace(persist_path)
                     if self.verbose:
                         logger.debug(f"Persisted LLM response to {persist_path}")
                 except Exception as e:
                     logger.warning(f"Failed to persist LLM response: {e}")
+                    try:
+                        tmp_persist = persist_path.with_suffix(".json.tmp")
+                        if tmp_persist.exists():
+                            tmp_persist.unlink()
+                    except OSError:
+                        pass
 
             patch_name = extract_between(
                 response.content,
