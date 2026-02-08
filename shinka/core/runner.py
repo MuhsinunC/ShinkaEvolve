@@ -730,6 +730,8 @@ class EvolutionRunner:
         results, rtime = self.scheduler.run(exec_fname, results_dir)
 
         code_embedding, e_cost = self.get_code_embedding(exec_fname)
+        if code_embedding:
+            self._persist_embedding(Path(exec_fname).parent, code_embedding)
 
         # Read the evaluated code for database insertion
         try:
@@ -933,16 +935,7 @@ class EvolutionRunner:
                 # Persist embedding to disk so crash recovery can reload it
                 # instead of wasting an API call to recompute.
                 if code_embedding:
-                    embed_path = Path(exec_fname).parent / "embedding.json"
-                    try:
-                        _tmp_fd, _tmp_p = tempfile.mkstemp(
-                            dir=str(embed_path.parent), suffix=".tmp"
-                        )
-                        with os.fdopen(_tmp_fd, "w") as _f:
-                            json.dump(code_embedding, _f)
-                        os.replace(_tmp_p, str(embed_path))
-                    except Exception as e:
-                        logger.debug(f"Could not persist embedding: {e}")
+                    self._persist_embedding(Path(exec_fname).parent, code_embedding)
 
                 if not code_embedding:
                     self.novelty_judge.log_novelty_skip_message("no embedding")
@@ -1170,12 +1163,32 @@ class EvolutionRunner:
         try:
             with open(embed_path, "r") as f:
                 data = json.load(f)
-            if isinstance(data, list) and len(data) > 0:
+            if isinstance(data, list) and len(data) > 0 and isinstance(data[0], (int, float)):
                 return data
             return None
         except Exception as e:
             logger.warning(f"Could not load persisted embedding from {embed_path}: {e}")
             return None
+
+    @staticmethod
+    def _persist_embedding(gen_dir: Path, embedding: List[float]) -> None:
+        """Atomically persist an embedding vector to gen_N/embedding.json."""
+        embed_path = gen_dir / "embedding.json"
+        _tmp_p = None
+        try:
+            _tmp_fd, _tmp_p = tempfile.mkstemp(
+                dir=str(embed_path.parent), suffix=".tmp"
+            )
+            with os.fdopen(_tmp_fd, "w") as _f:
+                json.dump(embedding, _f)
+            os.replace(_tmp_p, str(embed_path))
+        except Exception as e:
+            if _tmp_p:
+                try:
+                    os.unlink(_tmp_p)
+                except OSError:
+                    pass
+            logger.warning(f"Could not persist embedding to {embed_path}: {e}")
 
     def _recover_ghost_generations(self) -> int:
         """
@@ -1270,13 +1283,14 @@ class EvolutionRunner:
                         continue
 
                     try:
-                        # Submit the scorer job
-                        job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
-
-                        # Load persisted embedding from disk (saved during original submission)
+                        # Load persisted embedding before submission to avoid
+                        # a race with fast-completing scorer jobs.
                         ghost_embedding = self._load_persisted_embedding(gen_dir)
                         if ghost_embedding:
                             logger.info(f"Loaded persisted embedding for ghost gen {gen_idx}")
+
+                        # Submit the scorer job
+                        job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
 
                         # Add to running jobs with recovered metadata where possible
                         running_job = RunningJob(
@@ -1578,14 +1592,14 @@ class EvolutionRunner:
 
         # Fallback for recovered jobs: try loading persisted embedding from disk,
         # recompute via API only as a last resort.
-        if not code_embedding and self.embedding is not None:
+        if not code_embedding:
             gen_dir = Path(job.exec_fname).parent
             code_embedding = self._load_persisted_embedding(gen_dir)
             if code_embedding:
                 logger.info(
                     f"Loaded persisted embedding for recovered gen {job.generation}"
                 )
-            else:
+            elif self.embedding is not None:
                 try:
                     code_embedding, e_cost = self.get_code_embedding(job.exec_fname)
                     logger.info(
