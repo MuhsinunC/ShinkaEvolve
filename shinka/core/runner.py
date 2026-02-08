@@ -38,6 +38,7 @@ from shinka.core.sampler import PromptSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.novelty_judge import NoveltyJudge
 from shinka.llm.cache_diagnostics import print_cache_diagnostics
+from shinka.prompts import BASE_SYSTEM_MSG, DIFF_SYS_FORMAT
 from shinka.logo import print_gradient_logo
 
 FOLDER_PREFIX = "gen"
@@ -236,8 +237,10 @@ class EvolutionRunner:
         # Print prompt caching diagnostics (one-time at startup)
         # Build a representative system prompt: task description + format instructions
         # This is what gets cache_control: ephemeral in the Anthropic client
-        from shinka.prompts import BASE_SYSTEM_MSG, DIFF_SYS_FORMAT
         representative_sys = (evo_config.task_sys_msg or BASE_SYSTEM_MSG) + DIFF_SYS_FORMAT
+        # estimated_calls_per_generation uses max_concurrent_evals as a proxy for
+        # mutations per generation; actual count varies but this is close enough
+        # for advisory cost estimates
         print_cache_diagnostics(
             model_names=evo_config.llm_models,
             system_prompt=representative_sys,

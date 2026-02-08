@@ -94,8 +94,8 @@ CLAUDE_MODELS = {
         "input_price": 0.25 / M,
         "output_price": 1.25 / M,
         "cache_min_tokens": 2048,
-        "cache_write_price": 0.25 * 1.25 / M,  # Docs show $0.30 (rounded)
-        "cache_read_price": 0.25 * 0.10 / M,   # Docs show $0.03 (rounded)
+        "cache_write_price": 0.30 / M,  # From official pricing table
+        "cache_read_price": 0.03 / M,   # From official pricing table
     },
     # --- Bedrock direct model IDs (used when accessing via Bedrock SDK directly) ---
     "us.anthropic.claude-3-7-sonnet-20250219-v1:0": {

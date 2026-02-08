@@ -72,24 +72,45 @@ class TestGetCacheInfo:
         assert info["cache_min_tokens"] == 4096
 
     def test_cache_write_price_is_125x_input(self):
-        """Cache write should be 1.25x the base input price (verified from Anthropic docs)."""
+        """Cache write should be ~1.25x the base input price (verified from Anthropic docs).
+
+        Haiku 3 is excluded because Anthropic's pricing table lists $0.30/MTok
+        (not $0.3125) for its $0.25/MTok input price — a known rounding difference.
+        """
         for model_name, model_data in CLAUDE_MODELS.items():
-            if "cache_write_price" in model_data:
-                expected = model_data["input_price"] * 1.25
-                actual = model_data["cache_write_price"]
-                assert abs(actual - expected) < 1e-15, (
-                    f"{model_name}: cache_write_price {actual} != 1.25 * input_price {expected}"
-                )
+            if "cache_write_price" not in model_data:
+                continue
+            if model_name == "claude-3-haiku-20240307":
+                continue  # Uses official table value, not exact 1.25x
+            expected = model_data["input_price"] * 1.25
+            actual = model_data["cache_write_price"]
+            assert abs(actual - expected) < 1e-15, (
+                f"{model_name}: cache_write_price {actual} != 1.25 * input_price {expected}"
+            )
 
     def test_cache_read_price_is_010x_input(self):
-        """Cache read should be 0.10x the base input price (verified from Anthropic docs)."""
+        """Cache read should be ~0.10x the base input price (verified from Anthropic docs).
+
+        Haiku 3 is excluded because Anthropic's pricing table lists $0.03/MTok
+        (not $0.025) for its $0.25/MTok input price — a known rounding difference.
+        """
         for model_name, model_data in CLAUDE_MODELS.items():
-            if "cache_read_price" in model_data:
-                expected = model_data["input_price"] * 0.10
-                actual = model_data["cache_read_price"]
-                assert abs(actual - expected) < 1e-15, (
-                    f"{model_name}: cache_read_price {actual} != 0.10 * input_price {expected}"
-                )
+            if "cache_read_price" not in model_data:
+                continue
+            if model_name == "claude-3-haiku-20240307":
+                continue  # Uses official table value, not exact 0.10x
+            expected = model_data["input_price"] * 0.10
+            actual = model_data["cache_read_price"]
+            assert abs(actual - expected) < 1e-15, (
+                f"{model_name}: cache_read_price {actual} != 0.10 * input_price {expected}"
+            )
+
+    def test_haiku_3_uses_official_table_values(self):
+        """Haiku 3 cache prices come from the official pricing table,
+        not the 1.25x/0.10x formula (Anthropic rounds differently for this tier)."""
+        data = CLAUDE_MODELS["claude-3-haiku-20240307"]
+        assert abs(data["cache_write_price"] - 0.30 / 1_000_000) < 1e-15
+        assert abs(data["cache_read_price"] - 0.03 / 1_000_000) < 1e-15
 
 
 class TestFormatCacheDiagnostics:

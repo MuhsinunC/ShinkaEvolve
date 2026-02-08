@@ -20,19 +20,11 @@ _ALL_CLAUDE_MODELS: Dict[str, dict] = {**CLAUDE_MODELS, **BEDROCK_MODELS}
 def estimate_tokens(text: str) -> int:
     """Estimate token count for a text string.
 
-    Uses the anthropic tokenizer if available, otherwise falls back to a
-    word-based heuristic (~1.3 tokens per word, which is more accurate
-    than the chars/4 rule for mixed English/code content).
+    Uses a word-based heuristic (~1.3 tokens per word for English/code mix).
+    The Anthropic SDK only supports server-side token counting via
+    messages.count_tokens(), which requires an API call — too heavy for
+    a synchronous startup diagnostic.
     """
-    try:
-        from anthropic import Anthropic
-
-        client = Anthropic()
-        return client.count_tokens(text)
-    except Exception:
-        pass
-
-    # Fallback: word-based estimate (~1.3 tokens per word for English/code mix)
     words = text.split()
     return max(1, int(len(words) * 1.3))
 
