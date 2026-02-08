@@ -1448,23 +1448,25 @@ class EvolutionRunner:
         # Get job results
         results = self.scheduler.get_job_results(job.job_id, job.results_dir)
 
-        # Check for infrastructure failure marker written by the scorer.
-        # Infrastructure failures (e.g. credit exhaustion) are permanent and
-        # unrecoverable without operator intervention.  We halt evolution
-        # immediately and do NOT add the program to the DB — ghost recovery
-        # will retry this generation on resume.
-        infra_failure_file = Path(job.results_dir) / "infra_failure.json"
-        if infra_failure_file.exists():
+        # Check for scorer failure marker.  If the scoring script itself
+        # failed (as opposed to scoring a bad mutation), it writes
+        # scorer_failure.json instead of metrics.json.  This signals a fatal
+        # error that requires operator intervention (e.g. API credits
+        # exhausted, external service down permanently).  We halt evolution
+        # and do NOT add the program to the DB — ghost recovery will retry
+        # this generation on resume once the issue is fixed.
+        scorer_failure_file = Path(job.results_dir) / "scorer_failure.json"
+        if scorer_failure_file.exists():
             error_type, error_msg = "unknown", "unknown"
             try:
-                with open(infra_failure_file) as f:
-                    infra_data = json.load(f)
-                error_type = infra_data.get("error_type", "unknown")
-                error_msg = infra_data.get("error", "unknown")
+                with open(scorer_failure_file) as f:
+                    failure_data = json.load(f)
+                error_type = failure_data.get("error_type", "unknown")
+                error_msg = failure_data.get("error", "unknown")
             except Exception:
                 pass
             logger.error("=" * 70)
-            logger.error("INFRASTRUCTURE FAILURE — HALTING EVOLUTION")
+            logger.error("SCORER FAILURE — HALTING EVOLUTION")
             logger.error(
                 "Generation %d: [%s] %s",
                 job.generation, error_type, error_msg,
