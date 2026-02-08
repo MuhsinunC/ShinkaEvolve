@@ -93,6 +93,9 @@ def run_shinka_eval(
 
     # Clean up stale scorer failure marker from a previous attempt
     # (ghost recovery resubmits scorers for generations without metrics.json).
+    # NOTE: We handle ScorerFailure directly here instead of using
+    # scorer_failure_context because we need the early return to skip
+    # save_json_results().  The context manager is for custom eval scripts.
     _stale_marker = os.path.join(results_dir, _SCORER_FAILURE_FILE)
     if os.path.exists(_stale_marker):
         os.remove(_stale_marker)
