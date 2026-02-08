@@ -133,21 +133,29 @@ class CubicConcurrency:
     def _on_success(self) -> None:
         """Increase window on success."""
         self._total_successes += 1
+        old_int = int(self._window)
 
         if self._in_slow_start:
             # Exponential growth: +1 per success (doubles per round)
             self._window = min(self._window + 1, float(self._ceiling))
-            return
+        else:
+            # CUBIC: W(t) = C * (t - K)^3 + W_max
+            # Note: called with self._lock held via release() -> Condition context
+            t = time.monotonic() - self._epoch_start
+            K = self._compute_K()
+            w_cubic = self._C * ((t - K) ** 3) + self._w_max
 
-        # CUBIC: W(t) = C * (t - K)^3 + W_max
-        # Note: called with self._lock held via release() -> Condition context
-        t = time.monotonic() - self._epoch_start
-        K = self._compute_K()
-        w_cubic = self._C * ((t - K) ** 3) + self._w_max
+            # Ensure window never decreases on success (cubic curve is concave early)
+            target = max(1.0, min(w_cubic, float(self._ceiling)))
+            self._window = max(self._window, target)
 
-        # Ensure window never decreases on success (cubic curve is concave early)
-        target = max(1.0, min(w_cubic, float(self._ceiling)))
-        self._window = max(self._window, target)
+        new_int = int(self._window)
+        if new_int != old_int and (new_int % 5 == 0 or new_int <= 5):
+            phase = "slow-start" if self._in_slow_start else "CUBIC"
+            logger.info(
+                "CUBIC [%s]: window %d -> %d (active=%d)",
+                phase, old_int, new_int, self._active,
+            )
 
     def _compute_K(self) -> float:
         """Compute K: time to reach W_max after a decrease."""
