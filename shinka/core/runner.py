@@ -930,6 +930,20 @@ class EvolutionRunner:
                 code_embedding, e_cost = self.get_code_embedding(exec_fname)
                 embed_cost += e_cost
 
+                # Persist embedding to disk so crash recovery can reload it
+                # instead of wasting an API call to recompute.
+                if code_embedding:
+                    embed_path = Path(exec_fname).parent / "embedding.json"
+                    try:
+                        _tmp_fd, _tmp_p = tempfile.mkstemp(
+                            dir=str(embed_path.parent), suffix=".tmp"
+                        )
+                        with os.fdopen(_tmp_fd, "w") as _f:
+                            json.dump(code_embedding, _f)
+                        os.replace(_tmp_p, str(embed_path))
+                    except Exception as e:
+                        logger.debug(f"Could not persist embedding: {e}")
+
                 if not code_embedding:
                     self.novelty_judge.log_novelty_skip_message("no embedding")
                     break
@@ -1143,6 +1157,26 @@ class EvolutionRunner:
 
         return count
 
+    @staticmethod
+    def _load_persisted_embedding(gen_dir: Path) -> Optional[List[float]]:
+        """Load a previously persisted embedding from gen_N/embedding.json.
+
+        Returns the embedding vector, or None if the file doesn't exist or
+        is corrupt.
+        """
+        embed_path = gen_dir / "embedding.json"
+        if not embed_path.exists():
+            return None
+        try:
+            with open(embed_path, "r") as f:
+                data = json.load(f)
+            if isinstance(data, list) and len(data) > 0:
+                return data
+            return None
+        except Exception as e:
+            logger.warning(f"Could not load persisted embedding from {embed_path}: {e}")
+            return None
+
     def _recover_ghost_generations(self) -> int:
         """
         Recover 'ghost generations' - generations where main.py exists but scorer never ran.
@@ -1239,6 +1273,11 @@ class EvolutionRunner:
                         # Submit the scorer job
                         job_id = self.scheduler.submit_async(str(main_file), str(results_dir))
 
+                        # Load persisted embedding from disk (saved during original submission)
+                        ghost_embedding = self._load_persisted_embedding(gen_dir)
+                        if ghost_embedding:
+                            logger.info(f"Loaded persisted embedding for ghost gen {gen_idx}")
+
                         # Add to running jobs with recovered metadata where possible
                         running_job = RunningJob(
                             job_id=job_id,
@@ -1251,7 +1290,7 @@ class EvolutionRunner:
                             top_k_insp_ids=[],
                             code_diff=None,
                             meta_patch_data={"recovered_ghost": True},
-                            code_embedding=None,
+                            code_embedding=ghost_embedding,
                             embed_cost=0.0,
                             novelty_cost=0.0,
                         )
@@ -1399,16 +1438,18 @@ class EvolutionRunner:
                 private_metrics = metrics_val.get("private", {})
                 text_feedback = metrics_val.get("text_feedback", "")
 
-                # Recompute embedding for orphan-recovered generations so
-                # novelty search isn't degraded by missing embeddings.
-                orphan_embedding = None
-                if self.embedding is not None:
+                # Load persisted embedding from disk first, recompute only as fallback.
+                orphan_embedding = self._load_persisted_embedding(gen_dir)
+                if orphan_embedding:
+                    logger.info(f"Loaded persisted embedding for orphaned gen {gen_idx}")
+                elif self.embedding is not None:
                     try:
                         orphan_embedding, _ = self.get_code_embedding(
                             str(main_file)
                         )
                         logger.info(
-                            f"Computed embedding for orphaned gen {gen_idx}"
+                            f"Recomputed embedding for orphaned gen {gen_idx} "
+                            f"(no persisted file)"
                         )
                     except Exception as e:
                         logger.warning(
@@ -1535,20 +1576,26 @@ class EvolutionRunner:
         e_cost = job.embed_cost if job.embed_cost is not None else 0.0
         n_cost = job.novelty_cost if job.novelty_cost is not None else 0.0
 
-        # Recompute embedding for recovered jobs (ghost/orphan recovery sets
-        # code_embedding=None).  Without this, recovered generations permanently
-        # lack embeddings and degrade novelty search quality.
+        # Fallback for recovered jobs: try loading persisted embedding from disk,
+        # recompute via API only as a last resort.
         if not code_embedding and self.embedding is not None:
-            try:
-                code_embedding, e_cost = self.get_code_embedding(job.exec_fname)
+            gen_dir = Path(job.exec_fname).parent
+            code_embedding = self._load_persisted_embedding(gen_dir)
+            if code_embedding:
                 logger.info(
-                    f"Recomputed embedding for recovered gen {job.generation} "
-                    f"(cost: {e_cost:.4f})"
+                    f"Loaded persisted embedding for recovered gen {job.generation}"
                 )
-            except Exception as e:
-                logger.warning(
-                    f"Could not recompute embedding for gen {job.generation}: {e}"
-                )
+            else:
+                try:
+                    code_embedding, e_cost = self.get_code_embedding(job.exec_fname)
+                    logger.info(
+                        f"Recomputed embedding for recovered gen {job.generation} "
+                        f"(cost: {e_cost:.4f}) — no persisted file"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Could not recompute embedding for gen {job.generation}: {e}"
+                    )
 
         if self.verbose:
             logger.debug(
