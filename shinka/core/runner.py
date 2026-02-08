@@ -37,6 +37,7 @@ from shinka.edit import (
 from shinka.core.sampler import PromptSampler
 from shinka.core.summarizer import MetaSummarizer
 from shinka.core.novelty_judge import NoveltyJudge
+from shinka.llm.cache_diagnostics import print_cache_diagnostics
 from shinka.logo import print_gradient_logo
 
 FOLDER_PREFIX = "gen"
@@ -230,6 +231,18 @@ class EvolutionRunner:
             patch_types=evo_config.patch_types,
             patch_type_probs=evo_config.patch_type_probs,
             use_text_feedback=evo_config.use_text_feedback,
+        )
+
+        # Print prompt caching diagnostics (one-time at startup)
+        # Build a representative system prompt: task description + format instructions
+        # This is what gets cache_control: ephemeral in the Anthropic client
+        from shinka.prompts import BASE_SYSTEM_MSG, DIFF_SYS_FORMAT
+        representative_sys = (evo_config.task_sys_msg or BASE_SYSTEM_MSG) + DIFF_SYS_FORMAT
+        print_cache_diagnostics(
+            model_names=evo_config.llm_models,
+            system_prompt=representative_sys,
+            estimated_calls_per_generation=max(evo_config.max_concurrent_evals, 2),
+            num_generations=evo_config.num_generations,
         )
 
         # Initialize MetaSummarizer for meta-recommendations

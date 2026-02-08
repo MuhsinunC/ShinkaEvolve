@@ -1,15 +1,83 @@
 # Available models and pricing
-# Anthropic: https://www.anthropic.com/pricing#anthropic-api
+# Anthropic: https://platform.claude.com/docs/en/about-claude/pricing
+# Anthropic caching: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
 # OpenAI: https://platform.openai.com/docs/pricing
 # DeepSeek: https://api-docs.deepseek.com/quick_start/pricing/
 # Gemini: https://ai.google.dev/gemini-api/docs/pricing
 
 M = 1000000
 
+# Claude model entries include prompt caching fields (verified from official Anthropic docs):
+#   cache_min_tokens: Minimum cacheable prompt length (tokens)
+#   cache_write_price: Per-token cost for 5-minute cache writes (1.25x input_price)
+#   cache_read_price: Per-token cost for cache hits/refreshes (0.10x input_price)
+# Models without these fields do not support prompt caching.
+
 CLAUDE_MODELS = {
+    # --- Latest models ---
+    "claude-opus-4-6": {
+        "input_price": 5.0 / M,
+        "output_price": 25.0 / M,
+        "cache_min_tokens": 4096,
+        "cache_write_price": 6.25 / M,
+        "cache_read_price": 0.50 / M,
+    },
+    "claude-sonnet-4-5-20250929": {
+        "input_price": 3.0 / M,
+        "output_price": 15.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 3.75 / M,
+        "cache_read_price": 0.30 / M,
+    },
+    "claude-haiku-4-5-20251001": {
+        "input_price": 1.0 / M,
+        "output_price": 5.0 / M,
+        "cache_min_tokens": 4096,
+        "cache_write_price": 1.25 / M,
+        "cache_read_price": 0.10 / M,
+    },
+    # --- Legacy models ---
+    "claude-opus-4-5-20251101": {
+        "input_price": 5.0 / M,
+        "output_price": 25.0 / M,
+        "cache_min_tokens": 4096,
+        "cache_write_price": 6.25 / M,
+        "cache_read_price": 0.50 / M,
+    },
+    "claude-opus-4-1-20250805": {
+        "input_price": 15.0 / M,
+        "output_price": 75.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 18.75 / M,
+        "cache_read_price": 1.50 / M,
+    },
+    "claude-4-sonnet-20250514": {
+        "input_price": 3.0 / M,
+        "output_price": 15.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 3.75 / M,
+        "cache_read_price": 0.30 / M,
+    },
+    "claude-opus-4-20250514": {
+        "input_price": 15.0 / M,
+        "output_price": 75.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 18.75 / M,
+        "cache_read_price": 1.50 / M,
+    },
+    "claude-3-7-sonnet-20250219": {
+        "input_price": 3.0 / M,
+        "output_price": 15.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 3.75 / M,
+        "cache_read_price": 0.30 / M,
+    },
     "claude-3-5-haiku-20241022": {
         "input_price": 0.8 / M,
         "output_price": 4.0 / M,
+        "cache_min_tokens": 2048,
+        "cache_write_price": 1.0 / M,
+        "cache_read_price": 0.08 / M,
     },
     "claude-3-5-sonnet-20241022": {
         "input_price": 3.0 / M,
@@ -18,34 +86,31 @@ CLAUDE_MODELS = {
     "claude-3-opus-20240229": {
         "input_price": 15.0 / M,
         "output_price": 75.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 18.75 / M,
+        "cache_read_price": 1.50 / M,
     },
-    "claude-3-7-sonnet-20250219": {
-        "input_price": 3.0 / M,
-        "output_price": 15.0 / M,
+    "claude-3-haiku-20240307": {
+        "input_price": 0.25 / M,
+        "output_price": 1.25 / M,
+        "cache_min_tokens": 2048,
+        "cache_write_price": 0.25 * 1.25 / M,  # Docs show $0.30 (rounded)
+        "cache_read_price": 0.25 * 0.10 / M,   # Docs show $0.03 (rounded)
     },
+    # --- Bedrock direct model IDs (used when accessing via Bedrock SDK directly) ---
     "us.anthropic.claude-3-7-sonnet-20250219-v1:0": {
         "input_price": 3.0 / M,
         "output_price": 15.0 / M,
-    },
-    "claude-4-sonnet-20250514": {
-        "input_price": 3.0 / M,
-        "output_price": 15.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 3.75 / M,
+        "cache_read_price": 0.30 / M,
     },
     "us.anthropic.claude-sonnet-4-20250514-v1:0": {
         "input_price": 3.0 / M,
         "output_price": 15.0 / M,
-    },
-    "claude-haiku-4-5-20251001": {
-        "input_price": 1.0 / M,
-        "output_price": 5.0 / M,
-    },
-    "claude-sonnet-4-5-20250929": {
-        "input_price": 3.0 / M,
-        "output_price": 15.0 / M,
-    },
-    "claude-opus-4-5-20251101": {
-        "input_price": 5.0 / M,
-        "output_price": 25.0 / M,
+        "cache_min_tokens": 1024,
+        "cache_write_price": 3.75 / M,
+        "cache_read_price": 0.30 / M,
     },
 }
 
@@ -196,6 +261,9 @@ BEDROCK_MODELS = {
     "bedrock/anthropic.claude-opus-4-5-20251101-v1:0": CLAUDE_MODELS[
         "claude-opus-4-5-20251101"
     ],
+    "bedrock/anthropic.claude-opus-4-6-v1:0": CLAUDE_MODELS[
+        "claude-opus-4-6"
+    ],
 }
 
 REASONING_OAI_MODELS = [
@@ -215,9 +283,12 @@ REASONING_OAI_MODELS = [
 REASONING_CLAUDE_MODELS = [
     "claude-3-7-sonnet-20250219",
     "claude-4-sonnet-20250514",
+    "claude-opus-4-20250514",
+    "claude-opus-4-1-20250805",
     "claude-sonnet-4-5-20250929",
     "claude-haiku-4-5-20251001",
     "claude-opus-4-5-20251101",
+    "claude-opus-4-6",
 ]
 
 REASONING_DEEPSEEK_MODELS = [
@@ -243,6 +314,7 @@ REASONING_AZURE_MODELS = [
 REASONING_BEDROCK_MODELS = [
     "bedrock/us.anthropic.claude-3-7-sonnet-20250219-v1:0",
     "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    "bedrock/anthropic.claude-opus-4-6-v1:0",
 ]
 
 import requests

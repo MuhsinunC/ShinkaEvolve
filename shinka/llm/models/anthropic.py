@@ -171,8 +171,10 @@ def query_anthropic(
     has_thinking = "thinking" in kwargs
 
     # System prompt with cache_control - this is static and benefits from caching
-    # Requires minimum tokens: 1024 for Sonnet/Opus, 2048 for Haiku
-    # Current system prompt is ~1250 tokens, so caching works for Sonnet/Opus only
+    # Minimum token requirements vary by model (see pricing.py for per-model values):
+    #   1024 tokens: Sonnet 4.5, Opus 4.1, Opus 4, Sonnet 4, Sonnet 3.7
+    #   2048 tokens: Haiku 3.5, Haiku 3
+    #   4096 tokens: Opus 4.6, Opus 4.5, Haiku 4.5
     system_blocks = [
         {
             "type": "text",
@@ -271,12 +273,15 @@ def query_anthropic(
     # Regular input tokens (not cached)
     regular_input = response.usage.input_tokens - cache_creation_input_tokens - cache_read_input_tokens
 
-    # Cache write = 1.25× input price, cache read = 0.10× input price
-    input_price = CLAUDE_MODELS[model]["input_price"]
+    # Use centralized cache pricing from pricing.py (falls back to multipliers if missing)
+    model_info = CLAUDE_MODELS[model]
+    input_price = model_info["input_price"]
+    cache_write_price = model_info.get("cache_write_price", input_price * 1.25)
+    cache_read_price = model_info.get("cache_read_price", input_price * 0.10)
     input_cost = (
         input_price * regular_input +
-        input_price * 1.25 * cache_creation_input_tokens +
-        input_price * 0.10 * cache_read_input_tokens
+        cache_write_price * cache_creation_input_tokens +
+        cache_read_price * cache_read_input_tokens
     )
     output_cost = CLAUDE_MODELS[model]["output_price"] * response.usage.output_tokens
 
