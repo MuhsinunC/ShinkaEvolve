@@ -1448,6 +1448,34 @@ class EvolutionRunner:
         # Get job results
         results = self.scheduler.get_job_results(job.job_id, job.results_dir)
 
+        # Check for infrastructure failure marker written by the scorer.
+        # Infrastructure failures (e.g. credit exhaustion) are permanent and
+        # unrecoverable without operator intervention.  We halt evolution
+        # immediately and do NOT add the program to the DB — ghost recovery
+        # will retry this generation on resume.
+        infra_failure_file = Path(job.results_dir) / "infra_failure.json"
+        if infra_failure_file.exists():
+            error_type, error_msg = "unknown", "unknown"
+            try:
+                with open(infra_failure_file) as f:
+                    infra_data = json.load(f)
+                error_type = infra_data.get("error_type", "unknown")
+                error_msg = infra_data.get("error", "unknown")
+            except Exception:
+                pass
+            logger.error("=" * 70)
+            logger.error("INFRASTRUCTURE FAILURE — HALTING EVOLUTION")
+            logger.error(
+                "Generation %d: [%s] %s",
+                job.generation, error_type, error_msg,
+            )
+            logger.error(
+                "Fix the issue and resume with --resume to retry this generation."
+            )
+            logger.error("=" * 70)
+            self._shutdown_requested.set()
+            return  # Don't add to DB — generation slot NOT consumed
+
         # Read the evaluated code
         try:
             evaluated_code = Path(job.exec_fname).read_text(encoding="utf-8")
