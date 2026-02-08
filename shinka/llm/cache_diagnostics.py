@@ -7,14 +7,14 @@ enough to benefit from Anthropic's prompt caching, along with cost analysis.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional
+from typing import List, Optional
 
 from .models.pricing import CLAUDE_MODELS, BEDROCK_MODELS
 
 logger = logging.getLogger(__name__)
 
 # Merge Claude + Bedrock models for lookup (Bedrock entries reference the same dicts)
-_ALL_CLAUDE_MODELS: Dict[str, dict] = {**CLAUDE_MODELS, **BEDROCK_MODELS}
+_ALL_CLAUDE_MODELS: dict[str, dict] = {**CLAUDE_MODELS, **BEDROCK_MODELS}
 
 
 def estimate_tokens(text: str) -> int:
