@@ -6,6 +6,8 @@ import numpy as np
 import pickle
 from typing import Callable, Any, Dict, List, Tuple, Optional
 
+from shinka.exceptions import ScorerFailure, _write_scorer_failure, _SCORER_FAILURE_FILE
+
 DEFAULT_METRICS_ON_ERROR = {
     "combined_score": 0.0,
     "execution_time_mean": 0.0,
@@ -89,6 +91,12 @@ def run_shinka_eval(
         else DEFAULT_METRICS_ON_ERROR.copy()
     )
 
+    # Clean up stale scorer failure marker from a previous attempt
+    # (ghost recovery resubmits scorers for generations without metrics.json).
+    _stale_marker = os.path.join(results_dir, _SCORER_FAILURE_FILE)
+    if os.path.exists(_stale_marker):
+        os.remove(_stale_marker)
+
     overall_correct_flag = True
     first_error_message: Optional[str] = None
 
@@ -162,6 +170,12 @@ def run_shinka_eval(
             metrics["num_valid_runs"] = num_valid_runs
             metrics["num_invalid_runs"] = num_invalid_runs
             metrics["all_validation_errors"] = all_validation_errors_list
+
+    except ScorerFailure as e:
+        # Fatal scorer error — write marker file, skip metrics.json entirely.
+        # The runner will detect scorer_failure.json and halt evolution.
+        _write_scorer_failure(results_dir, e.error_type, str(e))
+        return {}, False, str(e)
 
     except Exception as e:
         print(f"Evaluation error: {e}")
