@@ -20,7 +20,7 @@ class ScorerFailure(Exception):
 
     Example::
 
-        raise ScorerFailure("Anthropic credits exhausted",
+        raise ScorerFailure("API credits exhausted",
                             error_type="CreditExhaustedError")
     """
 
