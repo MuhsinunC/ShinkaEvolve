@@ -40,7 +40,7 @@ def _atomic_json_write(path: str, data: Dict[str, Any], indent: int = 4) -> None
     the original ``path`` is either absent or contains the previous
     valid content.  Ghost/orphan recovery depends on this guarantee.
     """
-    dir_name = os.path.dirname(path)
+    dir_name = os.path.dirname(path) or "."
     fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
