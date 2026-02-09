@@ -698,15 +698,24 @@ class EvolutionRunner:
         else:
             seed_paths = [None]  # Will generate with LLM
 
+        defer_pca = multi_seed and len(seed_paths) > 1
         for seed_idx, seed_path in enumerate(seed_paths):
             self._run_single_seed(
                 seed_idx=seed_idx,
                 seed_path=seed_path,
                 multi_seed=multi_seed,
+                defer_pca=defer_pca,
             )
 
+        # Batch PCA recomputation after all seeds are loaded
+        if defer_pca:
+            with self._db_lock:
+                self.db.check_scheduled_operations()
+                self.db.save()
+
     def _run_single_seed(
-        self, seed_idx: int, seed_path: Optional[str], multi_seed: bool
+        self, seed_idx: int, seed_path: Optional[str], multi_seed: bool,
+        defer_pca: bool = False,
     ):
         """Evaluate and register one generation-0 seed program."""
         if multi_seed:
@@ -818,7 +827,7 @@ class EvolutionRunner:
             },
         )
 
-        self.db.add(db_program, verbose=True)
+        self.db.add(db_program, verbose=True, defer_pca=defer_pca)
         if self.llm_selection is not None and seed_idx == 0:
             self.llm_selection.set_baseline_score(
                 db_program.combined_score if correct_val else 0.0,
