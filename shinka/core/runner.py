@@ -1501,8 +1501,9 @@ class EvolutionRunner:
                         logger.debug(f"Gen {gen_idx} already added by another thread, skipping")
                         continue  # Another thread beat us to it
 
-                    self.db.add(db_program, verbose=True)
-                    self.db.save()
+                    # Defer PCA recomputation until all orphans are recovered
+                    # to avoid O(N²) PCA runs during bulk recovery
+                    self.db.add(db_program, verbose=True, defer_pca=True)
 
                 recovered += 1
                 logger.info(
@@ -1512,6 +1513,12 @@ class EvolutionRunner:
 
             except Exception as e:
                 logger.error(f"Failed to recover orphaned result for gen {gen_idx}: {e}")
+
+        # Batch save and deferred PCA after all orphans recovered
+        if recovered > 0:
+            with self._db_lock:
+                self.db.check_scheduled_operations()
+                self.db.save()
 
         return recovered
 

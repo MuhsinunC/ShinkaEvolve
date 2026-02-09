@@ -273,6 +273,7 @@ class ProgramDatabase:
         self.beam_search_parent_id: Optional[str] = None
         # For deferring expensive operations
         self._schedule_migration: bool = False
+        self._schedule_pca_recompute: bool = False
 
         # Initialize island manager (will be set after db connection)
         self.island_manager: Optional[CombinedIslandManager] = None
@@ -507,7 +508,7 @@ class ProgramDatabase:
         return (self.cursor.fetchone() or {"COUNT(*)": 0})["COUNT(*)"]
 
     @db_retry()
-    def add(self, program: Program, verbose: bool = False) -> str:
+    def add(self, program: Program, verbose: bool = False, defer_pca: bool = False) -> str:
         """
         Add a program to the database with optimized performance.
 
@@ -522,6 +523,11 @@ class ProgramDatabase:
 
         Args:
             program: The Program object to add
+            verbose: Print a rich summary of the added program
+            defer_pca: When True, skip PCA recomputation and scheduled
+                operations. Caller MUST call check_scheduled_operations()
+                after the batch is complete. Used for bulk recovery to
+                avoid O(N^2) PCA runs.
 
         Returns:
             str: The ID of the added program
@@ -652,7 +658,10 @@ class ProgramDatabase:
         self._update_best_program(program)
 
         # Recompute embeddings and clusters for all programs
-        self._recompute_embeddings_and_clusters()
+        if defer_pca:
+            self._schedule_pca_recompute = True
+        else:
+            self._recompute_embeddings_and_clusters()
 
         # Update generation tracking
         if program.generation > self.last_iteration:
@@ -683,7 +692,11 @@ class ProgramDatabase:
         if self.island_manager.should_schedule_migration(program):
             self._schedule_migration = True
 
-        self.check_scheduled_operations()
+        # When deferring PCA (bulk recovery), skip scheduled operations here —
+        # caller is responsible for calling check_scheduled_operations() after
+        # the batch is complete.
+        if not defer_pca:
+            self.check_scheduled_operations()
         return program.id
 
     def _program_from_row(self, row: sqlite3.Row) -> Optional[Program]:
@@ -1456,6 +1469,10 @@ class ProgramDatabase:
             logger.info("Running scheduled migration operation")
             self.island_manager.perform_migration(self.last_iteration)
             self._schedule_migration = False
+        if self._schedule_pca_recompute:
+            logger.info("Running deferred PCA recomputation")
+            self._recompute_embeddings_and_clusters()
+            self._schedule_pca_recompute = False
 
     def close(self):
         """Closes the database connection."""
