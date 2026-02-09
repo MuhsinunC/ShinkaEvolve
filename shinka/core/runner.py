@@ -306,9 +306,10 @@ class EvolutionRunner:
         self._shutdown_requested = threading.Event()
 
         # Thread pool for parallel LLM calls.
-        # For auto mode (0), use 500 threads — CUBIC controls actual concurrency.
+        # For auto mode (0), use AUTO_MODE_CEILING (10000) — CUBIC controls actual concurrency.
         # For explicit ceiling, match the ceiling.
-        _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else 500
+        from shinka.llm.pool import AUTO_MODE_CEILING
+        _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_CEILING
         self._llm_executor = ThreadPoolExecutor(max_workers=_executor_workers)
 
         # Evaluation slot semaphore - limits concurrent evaluations to max_concurrent_evals
@@ -496,8 +497,8 @@ class EvolutionRunner:
                 # Submit new jobs to fill the LLM queue (parallel submission)
                 # Use max_concurrent_llm for LLM jobs, NOT max_concurrent_evals (which limits evals)
                 with self._in_flight_llm_lock:
-                    # Auto mode (0): CUBIC controls concurrency, use executor size as cap
-                    effective_cap = self._max_concurrent_llm if self._max_concurrent_llm > 0 else 500
+                    # Auto mode (0): CUBIC controls concurrency, use AUTO_MODE_CEILING as cap
+                    effective_cap = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_CEILING
                     available_llm_slots = effective_cap - self._in_flight_llm_jobs
                     jobs_to_submit = min(
                         available_llm_slots,
