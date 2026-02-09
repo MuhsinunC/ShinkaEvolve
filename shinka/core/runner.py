@@ -29,6 +29,7 @@ from shinka.llm import (
     AsymmetricUCB,
     configure_pool,
 )
+from shinka.llm.pool import AUTO_MODE_CEILING
 from shinka.llm.circuit_breaker import EvalCircuitBreaker
 from shinka.edit import (
     apply_diff_patch,
@@ -308,7 +309,6 @@ class EvolutionRunner:
         # Thread pool for parallel LLM calls.
         # For auto mode (0), use AUTO_MODE_CEILING (10000) — CUBIC controls actual concurrency.
         # For explicit ceiling, match the ceiling.
-        from shinka.llm.pool import AUTO_MODE_CEILING
         _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_CEILING
         self._llm_executor = ThreadPoolExecutor(max_workers=_executor_workers)
 
