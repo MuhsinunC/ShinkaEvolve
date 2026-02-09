@@ -67,7 +67,7 @@ class EvolutionConfig:
     meta_llm_kwargs: dict = field(default_factory=lambda: {})
     meta_max_recommendations: int = 5
     embedding_model: Optional[str] = None
-    init_program_path: Optional[str] = "initial.py"
+    init_program_path: Optional[Union[str, List[str]]] = "initial.py"
     results_dir: Optional[str] = None
     max_novelty_attempts: int = 3
     code_embed_sim_threshold: float = 1.0
@@ -681,11 +681,41 @@ class EvolutionRunner:
         )
 
     def _run_generation_0(self):
-        """Setup and run generation 0 to initialize the database."""
-        initial_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0"
-        Path(initial_dir).mkdir(parents=True, exist_ok=True)
-        exec_fname = f"{initial_dir}/main.{self.lang_ext}"
-        results_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0/results"
+        """Setup and run generation 0 to initialize the database.
+
+        Supports multi-seed initialization: when init_program_path is a list,
+        each path seeds a separate island.  When it's a single path (or None),
+        the original single-seed behaviour is preserved.
+        """
+        init_paths = self.evo_config.init_program_path
+        multi_seed = isinstance(init_paths, list)
+
+        if multi_seed:
+            seed_paths = init_paths
+        elif init_paths:
+            seed_paths = [init_paths]
+        else:
+            seed_paths = [None]  # Will generate with LLM
+
+        for seed_idx, seed_path in enumerate(seed_paths):
+            self._run_single_seed(
+                seed_idx=seed_idx,
+                seed_path=seed_path,
+                multi_seed=multi_seed,
+            )
+
+    def _run_single_seed(
+        self, seed_idx: int, seed_path: Optional[str], multi_seed: bool
+    ):
+        """Evaluate and register one generation-0 seed program."""
+        if multi_seed:
+            seed_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0_seed_{seed_idx}"
+        else:
+            seed_dir = f"{self.results_dir}/{FOLDER_PREFIX}_0"
+
+        Path(seed_dir).mkdir(parents=True, exist_ok=True)
+        exec_fname = f"{seed_dir}/main.{self.lang_ext}"
+        results_dir = f"{seed_dir}/results"
         Path(results_dir).mkdir(parents=True, exist_ok=True)
 
         api_costs = 0.0
@@ -693,12 +723,13 @@ class EvolutionRunner:
         patch_description = "Initial program from file."
         patch_type = "init"
 
-        if self.evo_config.init_program_path:
+        if seed_path:
             if self.verbose:
                 logger.info(
-                    f"Copying initial program from {self.evo_config.init_program_path}"
+                    f"Copying seed {seed_idx} from {seed_path}"
                 )
-            shutil.copy(self.evo_config.init_program_path, exec_fname)
+            shutil.copy(seed_path, exec_fname)
+            patch_description = f"Seed {seed_idx} from {Path(seed_path).name}"
         else:
             if self.verbose:
                 logger.info(
@@ -771,6 +802,8 @@ class EvolutionRunner:
             public_metrics=public_metrics,
             private_metrics=private_metrics,
             text_feedback=text_feedback,
+            # Pre-set island_idx for multi-seed so assign_island() respects it
+            island_idx=seed_idx if multi_seed else None,
             metadata={
                 "compute_time": rtime,
                 "api_costs": api_costs,
@@ -785,7 +818,7 @@ class EvolutionRunner:
         )
 
         self.db.add(db_program, verbose=True)
-        if self.llm_selection is not None:
+        if self.llm_selection is not None and seed_idx == 0:
             self.llm_selection.set_baseline_score(
                 db_program.combined_score if correct_val else 0.0,
             )

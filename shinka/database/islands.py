@@ -128,6 +128,7 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
     def assign_island(self, program: Any) -> None:
         """
         Assigns an island index to a program.
+        - If island_idx is already set, respect it (for multi-seed initialization).
         - Children are placed on the same island as their parents.
         - For the first program added, it gets assigned to island 0 and copies
           are created for all other islands.
@@ -136,6 +137,14 @@ class CopyInitialProgramIslandStrategy(IslandStrategy):
         num_islands = getattr(self.config, "num_islands", 0)
         if num_islands <= 0:
             program.island_idx = 0
+            return
+
+        # Respect pre-set island_idx (used by multi-seed initialization)
+        if program.island_idx is not None:
+            logger.debug(
+                f"Respecting pre-set island {program.island_idx} "
+                f"for program {program.id}"
+            )
             return
 
         # Check if this is the very first program in the database
