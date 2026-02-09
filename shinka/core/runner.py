@@ -1790,13 +1790,25 @@ class EvolutionRunner:
 
         self.best_program_id = best_program.id
 
-        source_dir = f"{self.results_dir}/{FOLDER_PREFIX}_{best_program.generation}"
+        source_dir = Path(f"{self.results_dir}/{FOLDER_PREFIX}_{best_program.generation}")
+        # Multi-seed gen 0 uses gen_0_seed_N directories; find the right one
+        if not source_dir.exists() and best_program.generation == 0:
+            seed_dirs = sorted(source_dir.parent.glob(f"{FOLDER_PREFIX}_0_seed_*"))
+            if best_program.island_idx is not None and best_program.island_idx < len(seed_dirs):
+                source_dir = seed_dirs[best_program.island_idx]
+            elif seed_dirs:
+                source_dir = seed_dirs[0]
+
         best_dir = Path(self.results_dir) / "best"
 
         if best_dir.exists():
             shutil.rmtree(best_dir)
 
-        shutil.copytree(source_dir, best_dir)
+        if not source_dir.exists():
+            logger.warning(f"Source dir {source_dir} not found, skipping best copy")
+            return
+
+        shutil.copytree(str(source_dir), best_dir)
 
         if self.verbose:
             logger.info(
