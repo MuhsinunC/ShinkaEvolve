@@ -1367,12 +1367,7 @@ class EvolutionRunner:
             # Check if this generation is already in the database
             # NOTE: We check again inside the lock before inserting to prevent race conditions
             with self._db_lock:
-                self.db.cursor.execute(
-                    "SELECT COUNT(*) FROM programs WHERE generation = ?",
-                    (gen_idx,)
-                )
-                count = self.db.cursor.fetchone()[0]
-                if count > 0:
+                if self.db.generation_exists(gen_idx):
                     continue  # Already in database
 
             # This is an orphaned result - scorer finished but not in database
@@ -1493,11 +1488,7 @@ class EvolutionRunner:
                 with self._db_lock:
                     # Double-check inside lock to prevent race condition
                     # Another thread may have added this generation since our first check
-                    self.db.cursor.execute(
-                        "SELECT COUNT(*) FROM programs WHERE generation = ?",
-                        (gen_idx,)
-                    )
-                    if self.db.cursor.fetchone()[0] > 0:
+                    if self.db.generation_exists(gen_idx):
                         logger.debug(f"Gen {gen_idx} already added by another thread, skipping")
                         continue  # Another thread beat us to it
 

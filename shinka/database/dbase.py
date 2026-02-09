@@ -1109,6 +1109,17 @@ class ProgramDatabase:
 
     @db_retry()
     @_locked
+    def generation_exists(self, generation: int) -> bool:
+        """Check if any programs exist for the given generation."""
+        if not self.cursor:
+            raise ConnectionError("DB not connected.")
+        self.cursor.execute(
+            "SELECT COUNT(*) FROM programs WHERE generation = ?", (generation,)
+        )
+        return (self.cursor.fetchone() or {"COUNT(*)": 0})["COUNT(*)"] > 0
+
+    @db_retry()
+    @_locked
     def get_programs_by_generation(self, generation: int) -> List[Program]:
         """Get all programs from a specific generation."""
         if not self.cursor:
@@ -1565,6 +1576,7 @@ class ProgramDatabase:
                 conn.close()
 
     @db_retry()
+    @_locked
     def compute_similarity(
         self, code_embedding: List[float], island_idx: int
     ) -> List[float]:
@@ -1622,6 +1634,7 @@ class ProgramDatabase:
         return similarity_scores
 
     @db_retry()
+    @_locked
     def get_most_similar_program(
         self, code_embedding: List[float], island_idx: int
     ) -> Optional[Program]:
