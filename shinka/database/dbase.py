@@ -1,6 +1,7 @@
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from functools import wraps
@@ -125,6 +126,19 @@ def db_retry(max_retries=5, initial_delay=0.1, backoff_factor=2):
         return wrapper
 
     return decorator
+
+
+def _locked(method):
+    """Decorator that acquires self._lock around a ProgramDatabase method.
+
+    Use with RLock so reentrant calls (e.g., add → get) don't deadlock.
+    Stack BELOW @db_retry() so the lock is released during retry backoff.
+    """
+    @wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 @dataclass
@@ -261,6 +275,10 @@ class ProgramDatabase:
         self.conn: Optional[sqlite3.Connection] = None
         self.cursor: Optional[sqlite3.Cursor] = None
         self.read_only = read_only
+        # Internal reentrant lock protects cursor/connection from concurrent
+        # access.  RLock is needed because public methods call each other
+        # (e.g., add -> _update_best_program -> get).
+        self._lock = threading.RLock()
         # Only create embedding client if not in read-only mode
         # (e.g., WebUI doesn't need it for visualization)
         if not read_only:
@@ -508,6 +526,7 @@ class ProgramDatabase:
         return (self.cursor.fetchone() or {"COUNT(*)": 0})["COUNT(*)"]
 
     @db_retry()
+    @_locked
     def add(self, program: Program, verbose: bool = False, defer_pca: bool = False) -> str:
         """
         Add a program to the database with optimized performance.
@@ -817,6 +836,7 @@ class ProgramDatabase:
         return Program.from_dict(program_data)
 
     @db_retry()
+    @_locked
     def get(self, program_id: str) -> Optional[Program]:
         """Get a program by its ID with optimized JSON operations."""
         if not self.cursor:
@@ -826,6 +846,7 @@ class ProgramDatabase:
         return self._program_from_row(row)
 
     @db_retry()
+    @_locked
     def sample(
         self,
         target_generation=None,
@@ -971,6 +992,7 @@ class ProgramDatabase:
         )
 
     @db_retry()
+    @_locked
     def get_best_program(self, metric: Optional[str] = None) -> Optional[Program]:
         if not self.cursor:
             raise ConnectionError("DB not connected.")
@@ -1067,6 +1089,7 @@ class ProgramDatabase:
         return best_overall
 
     @db_retry()
+    @_locked
     def get_all_programs(self) -> List[Program]:
         """Get all programs from the database."""
         if not self.cursor:
@@ -1085,6 +1108,7 @@ class ProgramDatabase:
         return [p for p in programs if p is not None]
 
     @db_retry()
+    @_locked
     def get_programs_by_generation(self, generation: int) -> List[Program]:
         """Get all programs from a specific generation."""
         if not self.cursor:
@@ -1097,6 +1121,7 @@ class ProgramDatabase:
         return [p for p in programs if p is not None]
 
     @db_retry()
+    @_locked
     def get_top_programs(
         self,
         n: int = 10,
@@ -1208,6 +1233,7 @@ class ProgramDatabase:
 
         return []
 
+    @_locked
     def save(self, path: Optional[str] = None) -> None:
         if not self.conn or not self.cursor:
             logger.warning("No DB connection, skipping save.")
@@ -1463,6 +1489,7 @@ class ProgramDatabase:
 
         self._database_display.print_program_summary(program)
 
+    @_locked
     def check_scheduled_operations(self):
         """Run any operations that were scheduled during add but deferred for performance."""
         if self._schedule_migration:
@@ -1474,6 +1501,7 @@ class ProgramDatabase:
             self._recompute_embeddings_and_clusters()
             self._schedule_pca_recompute = False
 
+    @_locked
     def close(self):
         """Closes the database connection."""
         if self.conn:
