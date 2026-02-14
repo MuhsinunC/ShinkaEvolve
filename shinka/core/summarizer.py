@@ -83,19 +83,28 @@ class MetaSummarizer:
         return unprocessed_count >= meta_rec_interval
 
     def update_meta_memory(
-        self, best_program: Optional[Program] = None
+        self, best_program: Optional[Program] = None,
+        programs: Optional[list] = None,
     ) -> Tuple[Optional[str], float]:
         """
         Perform 3-step meta-analysis and update internal state.
         Returns tuple of (updated_recommendations, total_cost) or
         (None, 0.0) if no update occurred.
+
+        Args:
+            best_program: The current best program for context.
+            programs: Optional pre-snapshotted program list. When provided,
+                the caller has already cleared evaluated_since_last_meta
+                under lock, so this method skips the internal clear step.
+                Used by parallel seed init to prevent duplicate processing.
         """
         if not self.meta_llm_client:
             logger.warning("No meta LLM client configured")
             return None, 0.0
 
-        # Use recently evaluated programs for memory scratchpad
-        programs_to_analyze = (
+        # Use caller-provided snapshot if available, otherwise use internal list
+        externally_managed = programs is not None
+        programs_to_analyze = programs if externally_managed else (
             self.evaluated_since_last_meta if self.evaluated_since_last_meta else []
         )
 
@@ -158,12 +167,13 @@ class MetaSummarizer:
             logger.error(f"Failed to complete 3-step meta-analysis: {e}")
             return None, total_meta_cost
 
-        # Clear the evaluated programs list immediately after processing
-        # This ensures that only programs added AFTER this meta update
-        # will be saved as "unprocessed" programs
-        num_processed = len(self.evaluated_since_last_meta)
+        # Clear the evaluated programs list after processing.
+        # When programs were provided externally (parallel seed init),
+        # the caller already cleared the list under lock — just update the count.
+        num_processed = len(programs_to_analyze)
         self.total_programs_processed += num_processed
-        self.evaluated_since_last_meta = []
+        if not externally_managed:
+            self.evaluated_since_last_meta = []
         logger.info(
             f"Processed and cleared {num_processed} programs from meta memory "
             f"(total processed: {self.total_programs_processed})"

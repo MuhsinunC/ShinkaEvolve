@@ -887,9 +887,16 @@ class EvolutionRunner:
             # Check-then-act: determine if meta update is needed (under lock),
             # but perform the slow LLM calls outside the lock to avoid blocking
             # other threads' DB operations during parallel seed init.
+            # Atomically snapshot and clear the programs list to prevent
+            # concurrent threads from processing the same batch.
+            meta_programs_snapshot = None
             if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
                 should_update_meta = True
                 best_program_for_meta = self.db.get_best_program()
+                meta_programs_snapshot = list(
+                    self.meta_summarizer.evaluated_since_last_meta
+                )
+                self.meta_summarizer.evaluated_since_last_meta = []
 
             self._save_meta_memory()
 
@@ -897,10 +904,10 @@ class EvolutionRunner:
         if should_update_meta and best_program_for_meta is not None:
             logger.info(
                 f"Updating meta memory after processing "
-                f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
+                f"{len(meta_programs_snapshot)} programs..."
             )
             updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
-                best_program_for_meta
+                best_program_for_meta, programs=meta_programs_snapshot
             )
             if updated_recs:
                 with self._db_lock:
