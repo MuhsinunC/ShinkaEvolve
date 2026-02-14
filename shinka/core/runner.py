@@ -713,6 +713,7 @@ class EvolutionRunner:
                 f"Parallel seed init: {len(seed_paths)} seeds, "
                 f"{max_workers} workers"
             )
+            failed_seeds: list[tuple[int, Exception]] = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -730,6 +731,14 @@ class EvolutionRunner:
                         future.result()
                     except Exception as e:
                         logger.error(f"Seed {idx} failed: {e}")
+                        failed_seeds.append((idx, e))
+            if failed_seeds:
+                failed_indices = [str(idx) for idx, _ in failed_seeds]
+                raise RuntimeError(
+                    f"{len(failed_seeds)}/{len(seed_paths)} seeds failed "
+                    f"(indices: {', '.join(failed_indices)}). "
+                    f"First error: {failed_seeds[0][1]}"
+                )
         else:
             # Single seed — run synchronously (original behaviour)
             self._run_single_seed(
@@ -861,6 +870,8 @@ class EvolutionRunner:
 
         # Thread-safe DB + meta operations (parallel seed init calls this
         # from multiple threads via ThreadPoolExecutor).
+        should_update_meta = False
+        best_program_for_meta = None
         with self._db_lock:
             self.db.add(db_program, verbose=True, defer_pca=defer_pca)
             if self.llm_selection is not None and seed_idx == 0:
@@ -873,17 +884,26 @@ class EvolutionRunner:
             # Add the evaluated program to meta memory tracking
             self.meta_summarizer.add_evaluated_program(db_program)
 
-            # Check if we should update meta memory after adding this program
+            # Check-then-act: determine if meta update is needed (under lock),
+            # but perform the slow LLM calls outside the lock to avoid blocking
+            # other threads' DB operations during parallel seed init.
             if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
-                logger.info(
-                    f"Updating meta memory after processing "
-                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
-                )
-                best_program = self.db.get_best_program()
-                updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
-                    best_program
-                )
-                if updated_recs:
+                should_update_meta = True
+                best_program_for_meta = self.db.get_best_program()
+
+            self._save_meta_memory()
+
+        # Perform slow meta memory LLM calls outside the lock
+        if should_update_meta and best_program_for_meta is not None:
+            logger.info(
+                f"Updating meta memory after processing "
+                f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
+            )
+            updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
+                best_program_for_meta
+            )
+            if updated_recs:
+                with self._db_lock:
                     # Write meta output file for generation 0
                     self.meta_summarizer.write_meta_output(str(self.results_dir))
                     # Store meta cost for tracking
@@ -891,7 +911,7 @@ class EvolutionRunner:
                         logger.info(
                             f"Meta recommendation generation cost: ${meta_cost:.4f}"
                         )
-                        # Add meta cost to this program's metadata (the one that triggered the update)
+                        # Add meta cost to this program's metadata
                         if db_program.metadata is None:
                             db_program.metadata = {}
                         db_program.metadata["meta_cost"] = meta_cost
@@ -902,9 +922,7 @@ class EvolutionRunner:
                             (metadata_json, db_program.id),
                         )
                         self.db.conn.commit()
-
-        # Save meta memory state after each job completion (file I/O outside lock)
-        self._save_meta_memory()
+                    self._save_meta_memory()
 
     def _update_completed_generations(self):
         """
