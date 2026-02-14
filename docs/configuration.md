@@ -137,7 +137,7 @@ exp_name: "shinka_my_task"
 |-----------|------|---------|-------------|
 | `num_generations` | int | 20 | Number of evolutionary generations |
 | `max_concurrent_evals` | int | 2 | Maximum concurrent evaluations |
-| `max_concurrent_llm` | Optional[int] | None | Maximum concurrent LLM API calls (None=same as evals, 0=auto) |
+| `max_concurrent_llm` | Optional[Union[int, str]] | None | Maximum concurrent LLM API calls (None=same as evals, `"auto"`=CUBIC adaptive, N=ceiling) |
 | `max_patch_attempts` | int | 10 | Maximum attempts to generate valid patches |
 | `llm_models` | list | `["azure-gpt-4.1"]` | LLM models for mutations |
 | `patch_types` | list | `["diff", "full"]` | Types of code modifications |

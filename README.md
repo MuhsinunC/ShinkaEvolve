@@ -91,7 +91,7 @@ runner.run()
 | `patch_type_probs` | `[1.0]` | `List[float]` | Probabilities for each patch type |
 | `num_generations` | `10` | `int` | Number of evolution generations to run |
 | `max_concurrent_evals` | `2` | `int` | Maximum number of concurrent evaluation jobs |
-| `max_concurrent_llm` | `None` | `Optional[int]` | Maximum concurrent LLM API calls (None=same as evals, 0=auto CUBIC) |
+| `max_concurrent_llm` | `None` | `Optional[Union[int, str]]` | Maximum concurrent LLM API calls (None=same as evals, `"auto"`=CUBIC adaptive, N=ceiling) |
 | `max_patch_resamples` | `3` | `int` | Max times to resample a patch if it fails |
 | `max_patch_attempts` | `5` | `int` | Max attempts to generate a valid patch |
 | `job_type` | `"local"` | `str` | Job execution type: "local", "slurm_docker", "slurm_conda" |
