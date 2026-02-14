@@ -687,6 +687,9 @@ class EvolutionRunner:
         Supports multi-seed initialization: when init_program_path is a list,
         each path seeds a separate island.  When it's a single path (or None),
         the original single-seed behaviour is preserved.
+
+        Multi-seed evaluations are parallelized using max_concurrent_evals
+        to avoid the O(N * eval_time) sequential bottleneck.
         """
         init_paths = self.evo_config.init_program_path
         multi_seed = isinstance(init_paths, list)
@@ -699,10 +702,39 @@ class EvolutionRunner:
             seed_paths = [None]  # Will generate with LLM
 
         defer_pca = multi_seed and len(seed_paths) > 1
-        for seed_idx, seed_path in enumerate(seed_paths):
+
+        # Parallelize multi-seed evaluation: each seed is independent.
+        if len(seed_paths) > 1:
+            max_workers = min(
+                len(seed_paths),
+                self.evo_config.max_concurrent_evals,
+            )
+            logger.info(
+                f"Parallel seed init: {len(seed_paths)} seeds, "
+                f"{max_workers} workers"
+            )
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(
+                        self._run_single_seed,
+                        seed_idx=idx,
+                        seed_path=sp,
+                        multi_seed=multi_seed,
+                        defer_pca=defer_pca,
+                    ): idx
+                    for idx, sp in enumerate(seed_paths)
+                }
+                for future in as_completed(futures):
+                    idx = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error(f"Seed {idx} failed: {e}")
+        else:
+            # Single seed — run synchronously (original behaviour)
             self._run_single_seed(
-                seed_idx=seed_idx,
-                seed_path=seed_path,
+                seed_idx=0,
+                seed_path=seed_paths[0],
                 multi_seed=multi_seed,
                 defer_pca=defer_pca,
             )
@@ -827,48 +859,51 @@ class EvolutionRunner:
             },
         )
 
-        self.db.add(db_program, verbose=True, defer_pca=defer_pca)
-        if self.llm_selection is not None and seed_idx == 0:
-            self.llm_selection.set_baseline_score(
-                db_program.combined_score if correct_val else 0.0,
-            )
-        self.db.save()
-        self._update_best_solution()
+        # Thread-safe DB + meta operations (parallel seed init calls this
+        # from multiple threads via ThreadPoolExecutor).
+        with self._db_lock:
+            self.db.add(db_program, verbose=True, defer_pca=defer_pca)
+            if self.llm_selection is not None and seed_idx == 0:
+                self.llm_selection.set_baseline_score(
+                    db_program.combined_score if correct_val else 0.0,
+                )
+            self.db.save()
+            self._update_best_solution()
 
-        # Add the evaluated program to meta memory tracking
-        self.meta_summarizer.add_evaluated_program(db_program)
+            # Add the evaluated program to meta memory tracking
+            self.meta_summarizer.add_evaluated_program(db_program)
 
-        # Check if we should update meta memory after adding this program
-        if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
-            logger.info(
-                f"Updating meta memory after processing "
-                f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
-            )
-            best_program = self.db.get_best_program()
-            updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
-                best_program
-            )
-            if updated_recs:
-                # Write meta output file for generation 0
-                self.meta_summarizer.write_meta_output(str(self.results_dir))
-                # Store meta cost for tracking
-                if meta_cost > 0:
-                    logger.info(
-                        f"Meta recommendation generation cost: ${meta_cost:.4f}"
-                    )
-                    # Add meta cost to this program's metadata (the one that triggered the update)
-                    if db_program.metadata is None:
-                        db_program.metadata = {}
-                    db_program.metadata["meta_cost"] = meta_cost
-                    # Update the program in the database with the new metadata
-                    metadata_json = json.dumps(db_program.metadata)
-                    self.db.cursor.execute(
-                        "UPDATE programs SET metadata = ? WHERE id = ?",
-                        (metadata_json, db_program.id),
-                    )
-                    self.db.conn.commit()
+            # Check if we should update meta memory after adding this program
+            if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
+                logger.info(
+                    f"Updating meta memory after processing "
+                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
+                )
+                best_program = self.db.get_best_program()
+                updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
+                    best_program
+                )
+                if updated_recs:
+                    # Write meta output file for generation 0
+                    self.meta_summarizer.write_meta_output(str(self.results_dir))
+                    # Store meta cost for tracking
+                    if meta_cost > 0:
+                        logger.info(
+                            f"Meta recommendation generation cost: ${meta_cost:.4f}"
+                        )
+                        # Add meta cost to this program's metadata (the one that triggered the update)
+                        if db_program.metadata is None:
+                            db_program.metadata = {}
+                        db_program.metadata["meta_cost"] = meta_cost
+                        # Update the program in the database with the new metadata
+                        metadata_json = json.dumps(db_program.metadata)
+                        self.db.cursor.execute(
+                            "UPDATE programs SET metadata = ? WHERE id = ?",
+                            (metadata_json, db_program.id),
+                        )
+                        self.db.conn.commit()
 
-        # Save meta memory state after each job completion
+        # Save meta memory state after each job completion (file I/O outside lock)
         self._save_meta_memory()
 
     def _update_completed_generations(self):
