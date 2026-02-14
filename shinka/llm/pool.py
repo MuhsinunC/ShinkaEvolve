@@ -26,8 +26,12 @@ from shinka.llm.cubic import CubicConcurrency, is_rate_limit_error
 
 logger = logging.getLogger(__name__)
 
-# Auto mode ceiling — high enough to never be the bottleneck
+# Auto mode ceiling — high enough to never be the bottleneck for CUBIC concurrency
 AUTO_MODE_CEILING = 10000
+
+# Thread pool cap for auto mode — decoupled from CUBIC ceiling to avoid
+# spawning thousands of threads that contend for _db_lock.
+AUTO_MODE_THREAD_POOL_SIZE = 200
 
 
 @dataclass

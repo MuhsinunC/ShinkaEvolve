@@ -29,7 +29,7 @@ from shinka.llm import (
     AsymmetricUCB,
     configure_pool,
 )
-from shinka.llm.pool import AUTO_MODE_CEILING
+from shinka.llm.pool import AUTO_MODE_CEILING, AUTO_MODE_THREAD_POOL_SIZE
 from shinka.llm.circuit_breaker import EvalCircuitBreaker
 from shinka.edit import (
     apply_diff_patch,
@@ -310,9 +310,11 @@ class EvolutionRunner:
         self._shutdown_requested = threading.Event()
 
         # Thread pool for parallel LLM calls.
-        # For auto mode (0), use AUTO_MODE_CEILING (10000) — CUBIC controls actual concurrency.
-        # For explicit ceiling, match the ceiling.
-        _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_CEILING
+        # For auto mode (0), use AUTO_MODE_THREAD_POOL_SIZE (200) — NOT
+        # AUTO_MODE_CEILING (10000). CUBIC controls actual API concurrency,
+        # but the thread pool controls how many threads contend for _db_lock.
+        # Using 10000 threads caused massive lock contention and pipeline stalls.
+        _executor_workers = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_THREAD_POOL_SIZE
         self._llm_executor = ThreadPoolExecutor(max_workers=_executor_workers)
 
         # Evaluation slot semaphore - limits concurrent evaluations to max_concurrent_evals
@@ -501,8 +503,10 @@ class EvolutionRunner:
                 # Submit new jobs to fill the LLM queue (parallel submission)
                 # Use max_concurrent_llm for LLM jobs, NOT max_concurrent_evals (which limits evals)
                 with self._in_flight_llm_lock:
-                    # Auto mode (0): CUBIC controls concurrency, use AUTO_MODE_CEILING as cap
-                    effective_cap = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_CEILING
+                    # Auto mode (0): CUBIC controls API concurrency, but cap thread
+                    # submissions to AUTO_MODE_THREAD_POOL_SIZE to avoid massive lock
+                    # contention from thousands of queued threads.
+                    effective_cap = self._max_concurrent_llm if self._max_concurrent_llm > 0 else AUTO_MODE_THREAD_POOL_SIZE
                     available_llm_slots = effective_cap - self._in_flight_llm_jobs
                     jobs_to_submit = min(
                         available_llm_slots,
@@ -1769,42 +1773,27 @@ class EvolutionRunner:
         )
 
         # Protect ALL database operations with lock to prevent
-        # "Recursive use of cursors" error when worker threads run concurrently
+        # "Recursive use of cursors" error when worker threads run concurrently.
+        # IMPORTANT: Meta memory LLM calls are done OUTSIDE the lock to avoid
+        # starving worker threads (each LLM call takes 5-30+ seconds).
+        need_meta_update = False
+        meta_programs_snapshot = None
+        best_for_meta = None
+
         with self._db_lock:
             self.db.add(db_program, verbose=True)
 
             # Add the evaluated program to meta memory tracking
             self.meta_summarizer.add_evaluated_program(db_program)
 
-            # Check if we should update meta memory after adding this program
+            # Check if we should update meta memory — if so, snapshot the
+            # program list and clear it while we hold the lock, then do the
+            # actual LLM call outside the lock.
             if self.meta_summarizer.should_update_meta(self.evo_config.meta_rec_interval):
-                logger.info(
-                    f"Updating meta memory after processing "
-                    f"{len(self.meta_summarizer.evaluated_since_last_meta)} programs..."
-                )
-                best_program = self.db.get_best_program()
-                updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
-                    best_program
-                )
-                if updated_recs:
-                    # Write meta output file using accumulated program count
-                    self.meta_summarizer.write_meta_output(str(self.results_dir))
-                    # Store meta cost for tracking
-                    if meta_cost > 0:
-                        logger.info(
-                            f"Meta recommendation generation cost: ${meta_cost:.4f}"
-                        )
-                        # Add meta cost to this program's metadata (the one that triggered the update)
-                        if db_program.metadata is None:
-                            db_program.metadata = {}
-                        db_program.metadata["meta_cost"] = meta_cost
-                        # Update the program in the database with the new metadata
-                        metadata_json = json.dumps(db_program.metadata)
-                        self.db.cursor.execute(
-                            "UPDATE programs SET metadata = ? WHERE id = ?",
-                            (metadata_json, db_program.id),
-                        )
-                        self.db.conn.commit()
+                meta_programs_snapshot = list(self.meta_summarizer.evaluated_since_last_meta)
+                self.meta_summarizer.evaluated_since_last_meta.clear()
+                best_for_meta = self.db.get_best_program()
+                need_meta_update = True
 
             if self.llm_selection is not None:
                 if "model_name" not in db_program.metadata:
@@ -1840,6 +1829,34 @@ class EvolutionRunner:
 
             self.db.save()
             self._update_best_solution()
+
+        # Meta memory LLM call — OUTSIDE _db_lock to avoid starving worker
+        # threads that need the lock for parent sampling and novelty checks.
+        if need_meta_update:
+            logger.info(
+                f"Updating meta memory after processing "
+                f"{len(meta_programs_snapshot)} programs..."
+            )
+            updated_recs, meta_cost = self.meta_summarizer.update_meta_memory(
+                best_for_meta, programs=meta_programs_snapshot
+            )
+            if updated_recs:
+                self.meta_summarizer.write_meta_output(str(self.results_dir))
+                if meta_cost > 0:
+                    logger.info(
+                        f"Meta recommendation generation cost: ${meta_cost:.4f}"
+                    )
+                    # Write meta cost back to DB under a brief lock
+                    with self._db_lock:
+                        if db_program.metadata is None:
+                            db_program.metadata = {}
+                        db_program.metadata["meta_cost"] = meta_cost
+                        metadata_json = json.dumps(db_program.metadata)
+                        self.db.cursor.execute(
+                            "UPDATE programs SET metadata = ? WHERE id = ?",
+                            (metadata_json, db_program.id),
+                        )
+                        self.db.conn.commit()
 
         # Note: Meta summarization check is now done after completed generations
         # are updated in the main loop to ensure correct timing
